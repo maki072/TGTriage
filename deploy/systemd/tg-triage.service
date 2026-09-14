@@ -1,0 +1,53 @@
+[Unit]
+Description=Telegram Business AI assistant and task manager
+Documentation=file:///opt/tg-triage/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=tgtriage
+Group=tgtriage
+EnvironmentFile=/etc/tg-triage/tg-triage.env
+ExecStart=/usr/local/bin/tg-triage
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=40s
+KillSignal=SIGTERM
+
+# /var/lib/tg-triage (DB_PATH lives here), owned by the service user
+StateDirectory=tg-triage
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/tg-triage
+UMask=0077
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

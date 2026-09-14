@@ -1,0 +1,27 @@
+# Build output
+/bin/
+/dist/
+
+# Local runtime data / secrets — never commit real config or databases
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+/data/
+
+# Claude Code local session state — contains machine-specific paths/hosts, not project source
+.claude/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Go
+*.test
+*.out
+coverage.txt

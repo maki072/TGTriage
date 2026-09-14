@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Vet & test
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: Build static linux/amd64 binary
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v2 \
+            go build -trimpath -tags netgo,osusergo \
+            -ldflags "-s -w -buildid= -X main.version=${VERSION}" \
+            -o bin/tg-triage-linux-amd64 ./cmd/tgtriage
+          file bin/tg-triage-linux-amd64 | grep -q 'statically linked'
+
+      - name: Build installer archive
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          STAGE="dist/tg-triage-${VERSION}-linux-amd64"
+          # Mirror the repo's own relative layout (bin/ + deploy/{install.sh,systemd/}) so
+          # install.sh's SCRIPT_DIR-relative lookups (../.env.example, systemd/*.service)
+          # work unmodified whether run from a checkout or from this extracted archive.
+          mkdir -p "$STAGE/bin" "$STAGE/deploy/systemd"
+          cp bin/tg-triage-linux-amd64 "$STAGE/bin/tg-triage-linux-amd64"
+          cp deploy/install.sh "$STAGE/deploy/install.sh"
+          cp deploy/systemd/tg-triage.service "$STAGE/deploy/systemd/tg-triage.service"
+          cp .env.example "$STAGE/.env.example"
+          cp README.md LICENSE "$STAGE/"
+          chmod +x "$STAGE/deploy/install.sh" "$STAGE/bin/tg-triage-linux-amd64"
+          tar -C dist -czf "dist/tg-triage-${VERSION}-linux-amd64.tar.gz" "tg-triage-${VERSION}-linux-amd64"
+          ( cd dist && sha256sum "tg-triage-${VERSION}-linux-amd64.tar.gz" > "tg-triage-${VERSION}-linux-amd64.tar.gz.sha256" )
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tg-triage-*.tar.gz
+            dist/tg-triage-*.tar.gz.sha256
+            bin/tg-triage-linux-amd64
+          generate_release_notes: true
