@@ -24,7 +24,8 @@ if ! id "$USER_NAME" >/dev/null 2>&1; then
   echo "created system user $USER_NAME"
 fi
 
-install -m 0755 "$BIN_SRC" /usr/local/bin/$SERVICE
+install -d -m 0755 /opt/$SERVICE
+install -m 0755 "$BIN_SRC" /opt/$SERVICE/$SERVICE
 
 install -d -m 0750 -o root -g "$USER_NAME" "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then

@@ -1,6 +1,6 @@
 [Unit]
 Description=Telegram Business AI assistant and task manager
-Documentation=file:///opt/tg-triage/README.md
+Documentation=https://github.com/maki072/TGTriage
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -11,7 +11,7 @@ Type=simple
 User=tgtriage
 Group=tgtriage
 EnvironmentFile=/etc/tg-triage/tg-triage.env
-ExecStart=/usr/local/bin/tg-triage
+ExecStart=/opt/tg-triage/tg-triage
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=40s

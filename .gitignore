@@ -13,6 +13,7 @@
 
 # Claude Code local session state — contains machine-specific paths/hosts, not project source
 .claude/
+CLAUDE.local.md
 
 # Editors / OS
 .vscode/
