@@ -10,7 +10,11 @@ import (
 
 // TaskCreated implements service.Notifier.
 func (b *Bot) TaskCreated(ctx context.Context, t *domain.Task) {
-	if err := b.renderTask(ctx, nil, t, "🆕 <b>Новая задача</b>", nil); err != nil {
+	header := "🆕 <b>Новая задача</b>"
+	if !t.HasChat() {
+		header = "🆕 <b>Новая задача из пересланного</b>"
+	}
+	if err := b.renderTask(ctx, nil, t, header, nil); err != nil {
 		b.log.Error("notify task created", "task_id", t.ID, "err", err)
 	}
 }
@@ -30,6 +34,17 @@ func (b *Bot) AnalysisFailed(ctx context.Context, rec *domain.AnalysisRecord, co
 	markup := kb(row(cb("🔁 Повторить анализ", fmt.Sprintf("ar:%d", rec.ID))), row(cb("⚙️ Настройки", "st")))
 	if err := b.sendText(ctx, text, markup); err != nil {
 		b.log.Error("notify analysis failure", "err", err)
+	}
+}
+
+// ForwardFailed implements service.Notifier. Forwards are not stored, so there is nothing to retry
+// from the bot — the owner forwards the messages again.
+func (b *Bot) ForwardFailed(ctx context.Context, rec *domain.AnalysisRecord) {
+	text := fmt.Sprintf("⚠️ <b>Не удалось создать задачу из пересланного</b>\n\n"+
+		"🤖 %s · <code>%s</code>\n<code>%s</code>\n\n💬 <blockquote expandable>%s</blockquote>\n\nПерешлите сообщения ещё раз.",
+		providerTitle(rec.Provider), esc(rec.Model), esc(trunc(rec.Error, 400)), esc(trunc(rec.InputText, 1500)))
+	if err := b.sendText(ctx, text, kb(row(cb("⚙️ Настройки", "st")))); err != nil {
+		b.log.Error("notify forward failure", "err", err)
 	}
 }
 

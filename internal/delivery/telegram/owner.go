@@ -27,6 +27,9 @@ const helpText = `🤖 <b>Персональный ассистент на Teleg
 /settings — провайдер AI, модели, дебаунс, чувствительность, дайджест
 /cancel — отменить ввод
 
+<b>Пересылка</b>
+Перешлите боту сообщение (или сразу несколько) из любого чата — чужое или своё, — и оно станет задачей.
+
 <b>Подключение</b>
 Telegram → Настройки → Telegram Business → Чат-боты → укажите этого бота и разрешите «Отвечать на сообщения» (и «Читать сообщения» — для отметки прочитанным).`
 
@@ -36,6 +39,10 @@ func (b *Bot) onPrivateMessage(ctx context.Context, m *telegram.Message) {
 	}
 	if m.From == nil || m.From.ID != b.cfg.OwnerID {
 		b.log.Warn("message from non-owner ignored", "user_id", m.Chat.ID)
+		return
+	}
+	if m.ForwardOrigin != nil {
+		b.onForward(ctx, m)
 		return
 	}
 	text := strings.TrimSpace(m.Text)
@@ -52,6 +59,28 @@ func (b *Bot) onPrivateMessage(ctx context.Context, m *telegram.Message) {
 	}
 	if err := b.showMainMenu(ctx, nil); err != nil {
 		b.log.Warn("show menu", "err", err)
+	}
+}
+
+// onForward hands a message the owner forwarded from another chat to triage, which turns it into a task.
+// A multi-message forward arrives as separate updates; the service glues them into one batch.
+func (b *Bot) onForward(ctx context.Context, m *telegram.Message) {
+	text := m.Content()
+	if text == "" {
+		return
+	}
+	o := m.ForwardOrigin
+	dm := domain.Message{MessageID: m.MessageID, SenderName: o.AuthorName(), Text: text, SentAt: time.Unix(o.Date, 0)}
+	if o.SenderUser != nil {
+		dm.SenderID = o.SenderUser.ID
+		dm.SenderUsername = o.SenderUser.Username
+		dm.Outgoing = o.SenderUser.ID == b.cfg.OwnerID
+	} else if c := o.AuthorChat(); c != nil {
+		dm.SenderUsername = c.Username
+	}
+	b.triage.OnForwarded(dm)
+	if err := b.api.SendChatAction(ctx, b.cfg.OwnerID, "typing"); err != nil {
+		b.log.Debug("sendChatAction failed", "err", err)
 	}
 }
 

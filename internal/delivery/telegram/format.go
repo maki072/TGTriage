@@ -158,6 +158,8 @@ func humanError(err error) string {
 		return "Бот не подключён к Telegram Business (Настройки Telegram → Telegram Business → Чат-боты)"
 	case errors.Is(err, domain.ErrCannotReply):
 		return "У бота нет права отвечать на сообщения — включите его в настройках чат-бота Telegram Business"
+	case errors.Is(err, domain.ErrNoSourceChat):
+		return "Задача создана из пересланного сообщения — ответить собеседнику из бота нельзя"
 	case errors.Is(err, domain.ErrEmptyReply):
 		return "Текст ответа пуст"
 	case errors.Is(err, domain.ErrProviderUnset):

@@ -206,13 +206,17 @@ func (b *Bot) taskCardText(t *domain.Task, header string, links bool) string {
 	fmt.Fprintf(&sb, "Статус: %s\n\n", status)
 
 	sender := esc(trunc(t.SenderName, 60))
-	if links {
+	if links && (t.SenderUsername != "" || t.SenderID != 0) {
 		sender = fmt.Sprintf(`<a href="%s">%s</a>`, esc(profileURL(t.SenderUsername, t.SenderID)), sender)
 	}
 	if t.SenderUsername != "" {
 		sender += " (@" + esc(t.SenderUsername) + ")"
 	}
-	fmt.Fprintf(&sb, "👤 От: %s\n", sender)
+	if t.HasChat() {
+		fmt.Fprintf(&sb, "👤 От: %s\n", sender)
+	} else {
+		fmt.Fprintf(&sb, "📨 Переслано, автор: %s\n", sender)
+	}
 	if links && t.FirstSourceMessageID() > 0 {
 		fmt.Fprintf(&sb, "💬 <a href=\"%s\">Открыть исходное сообщение</a>\n", esc(messageURL(t.ChatID, t.FirstSourceMessageID())))
 	}
@@ -249,16 +253,18 @@ func (b *Bot) taskKeyboard(t *domain.Task) *telegram.InlineKeyboardMarkup {
 	data := func(action string) string { return fmt.Sprintf("ta:%s:%d", action, id) }
 	var rows [][]button
 	if t.Status.IsOpen() {
-		var r1 []button
-		if t.DraftReply != "" {
-			label := "🚀 Ответить черновиком"
-			if t.ReplySentAt != nil {
-				label = "🚀 Отправить черновик ещё раз"
+		if t.HasChat() {
+			var r1 []button
+			if t.DraftReply != "" {
+				label := "🚀 Ответить черновиком"
+				if t.ReplySentAt != nil {
+					label = "🚀 Отправить черновик ещё раз"
+				}
+				r1 = append(r1, cb(label, data("draft")))
 			}
-			r1 = append(r1, cb(label, data("draft")))
+			r1 = append(r1, cb("✏️ Свой ответ", data("reply")))
+			rows = append(rows, r1)
 		}
-		r1 = append(r1, cb("✏️ Свой ответ", data("reply")))
-		rows = append(rows, r1)
 
 		var r2 []button
 		if t.Status != domain.StatusInProgress {
@@ -267,7 +273,11 @@ func (b *Bot) taskKeyboard(t *domain.Task) *telegram.InlineKeyboardMarkup {
 		r2 = append(r2, cb("✅ Закрыть", data("done")))
 		rows = append(rows, r2, row(cb("⏰ Отложить", data("snz")), cb("🗑 Ошибка", data("fp"))))
 	} else {
-		rows = append(rows, row(cb("♻️ Вернуть в работу", data("reopen")), cb("✏️ Написать", data("reply"))))
+		r := row(cb("♻️ Вернуть в работу", data("reopen")))
+		if t.HasChat() {
+			r = append(r, cb("✏️ Написать", data("reply")))
+		}
+		rows = append(rows, r)
 	}
 	rows = append(rows, row(cb("⬅️ К списку", b.states.list().data()), cb("🏠 Меню", "m")))
 	return &telegram.InlineKeyboardMarkup{InlineKeyboard: rows}

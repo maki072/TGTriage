@@ -189,6 +189,11 @@ func (c *Client) EditMessageText(ctx context.Context, p EditMessageTextParams) e
 	return c.call(ctx, c.http, "editMessageText", p, nil)
 }
 
+// SendChatAction shows a status such as "typing" in the chat for up to 5 seconds.
+func (c *Client) SendChatAction(ctx context.Context, chatID int64, action string) error {
+	return c.call(ctx, c.http, "sendChatAction", map[string]any{"chat_id": chatID, "action": action}, nil)
+}
+
 func (c *Client) AnswerCallbackQuery(ctx context.Context, id, text string, alert bool) error {
 	return c.call(ctx, c.http, "answerCallbackQuery", map[string]any{
 		"callback_query_id": id,

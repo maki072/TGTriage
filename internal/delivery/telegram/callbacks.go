@@ -260,12 +260,12 @@ func (b *Bot) taskAction(ctx context.Context, ref *msgRef, action string, id int
 	case "work":
 		return setStatus(domain.StatusInProgress, "👀 Взято в работу")
 	case "done":
-		if !b.settings.Get().NotifyDoneOnClose {
-			return setStatus(domain.StatusDone, "✅ Задача закрыта")
-		}
 		t, err := b.tasks.Get(ctx, id)
 		if err != nil {
 			return err
+		}
+		if !b.settings.Get().NotifyDoneOnClose || !t.HasChat() {
+			return setStatus(domain.StatusDone, "✅ Задача закрыта")
 		}
 		return b.renderTask(ctx, ref, t, "✅ <b>Закрыть задачу?</b>", closeConfirmKeyboard(id))
 	case "fp":

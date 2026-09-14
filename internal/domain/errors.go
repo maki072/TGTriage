@@ -8,6 +8,7 @@ var (
 	ErrNotFound      = errors.New("not found")
 	ErrNoConnection  = errors.New("business connection is not available")
 	ErrCannotReply   = errors.New("bot has no permission to reply in this chat")
+	ErrNoSourceChat  = errors.New("task is not linked to a chat")
 	ErrEmptyReply    = errors.New("reply text is empty")
 	ErrInvalidInput  = errors.New("invalid input")
 	ErrProviderUnset = errors.New("AI provider is not configured")

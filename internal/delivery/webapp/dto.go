@@ -12,6 +12,7 @@ import (
 type Task struct {
 	ID             int64   `json:"id"`
 	ChatID         int64   `json:"chat_id"`
+	Forwarded      bool    `json:"forwarded"` // created from a forwarded message: no chat to reply to
 	SenderName     string  `json:"sender_name"`
 	SenderUsername string  `json:"sender_username"`
 	ProfileURL     string  `json:"profile_url"`
@@ -56,7 +57,7 @@ func profileURL(username string, userID int64) string {
 func toTaskDTO(t domain.Task, loc *time.Location) Task {
 	now := time.Now()
 	return Task{
-		ID: t.ID, ChatID: t.ChatID,
+		ID: t.ID, ChatID: t.ChatID, Forwarded: !t.HasChat(),
 		SenderName: t.SenderName, SenderUsername: t.SenderUsername,
 		ProfileURL:    profileURL(t.SenderUsername, t.SenderID),
 		Title:         t.Title,

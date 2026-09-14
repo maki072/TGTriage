@@ -39,6 +39,8 @@ func handleErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "Telegram Business is not connected")
 	case errors.Is(err, domain.ErrCannotReply):
 		writeError(w, http.StatusConflict, "the bot has no permission to reply in this chat")
+	case errors.Is(err, domain.ErrNoSourceChat):
+		writeError(w, http.StatusConflict, "the task was created from a forwarded message and has no chat to reply to")
 	case errors.Is(err, domain.ErrProviderUnset):
 		writeError(w, http.StatusConflict, "no AI provider is configured")
 	case errors.As(err, &apiErr):

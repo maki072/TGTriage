@@ -84,27 +84,70 @@ type Poll struct {
 	Question string `json:"question"`
 }
 
+// MessageOrigin describes where a forwarded message originally came from.
+type MessageOrigin struct {
+	Type            string `json:"type"` // user | hidden_user | chat | channel
+	Date            int64  `json:"date"` // when the original message was sent
+	SenderUser      *User  `json:"sender_user,omitempty"`
+	SenderUserName  string `json:"sender_user_name,omitempty"`
+	SenderChat      *Chat  `json:"sender_chat,omitempty"`
+	Chat            *Chat  `json:"chat,omitempty"`
+	AuthorSignature string `json:"author_signature,omitempty"`
+}
+
+// AuthorChat returns the originating chat for chat and channel origins, nil otherwise.
+func (o *MessageOrigin) AuthorChat() *Chat {
+	if o.SenderChat != nil {
+		return o.SenderChat
+	}
+	return o.Chat
+}
+
+// AuthorName returns a human-readable name of the original author.
+func (o *MessageOrigin) AuthorName() string {
+	switch {
+	case o.SenderUser != nil:
+		return o.SenderUser.FullName()
+	case o.SenderUserName != "":
+		return o.SenderUserName
+	}
+	var name string
+	if c := o.AuthorChat(); c != nil {
+		name = c.Title
+	}
+	switch {
+	case name == "" && o.AuthorSignature != "":
+		name = o.AuthorSignature
+	case o.AuthorSignature != "":
+		name += " (" + o.AuthorSignature + ")"
+	case name == "":
+		name = "неизвестный автор"
+	}
+	return name
+}
+
 type Message struct {
-	MessageID            int       `json:"message_id"`
-	From                 *User     `json:"from,omitempty"`
-	SenderBusinessBot    *User     `json:"sender_business_bot,omitempty"`
-	Chat                 Chat      `json:"chat"`
-	Date                 int64     `json:"date"`
-	BusinessConnectionID string    `json:"business_connection_id,omitempty"`
-	ReplyToMessage       *Message  `json:"reply_to_message,omitempty"`
-	Text                 string    `json:"text,omitempty"`
-	Caption              string    `json:"caption,omitempty"`
-	Photo                []Media   `json:"photo,omitempty"`
-	Video                *Media    `json:"video,omitempty"`
-	VideoNote            *Media    `json:"video_note,omitempty"`
-	Voice                *Media    `json:"voice,omitempty"`
-	Audio                *Media    `json:"audio,omitempty"`
-	Animation            *Media    `json:"animation,omitempty"`
-	Document             *Media    `json:"document,omitempty"`
-	Sticker              *Sticker  `json:"sticker,omitempty"`
-	Location             *Location `json:"location,omitempty"`
-	Contact              *Contact  `json:"contact,omitempty"`
-	Poll                 *Poll     `json:"poll,omitempty"`
+	MessageID            int            `json:"message_id"`
+	From                 *User          `json:"from,omitempty"`
+	SenderBusinessBot    *User          `json:"sender_business_bot,omitempty"`
+	Chat                 Chat           `json:"chat"`
+	Date                 int64          `json:"date"`
+	BusinessConnectionID string         `json:"business_connection_id,omitempty"`
+	ReplyToMessage       *Message       `json:"reply_to_message,omitempty"`
+	ForwardOrigin        *MessageOrigin `json:"forward_origin,omitempty"`
+	Text                 string         `json:"text,omitempty"`
+	Caption              string         `json:"caption,omitempty"`
+	Photo                []Media        `json:"photo,omitempty"`
+	Video                *Media         `json:"video,omitempty"`
+	VideoNote            *Media         `json:"video_note,omitempty"`
+	Voice                *Media         `json:"voice,omitempty"`
+	Audio                *Media         `json:"audio,omitempty"`
+	Animation            *Media         `json:"animation,omitempty"`
+	Document             *Media         `json:"document,omitempty"`
+	Sticker              *Sticker       `json:"sticker,omitempty"`
+	Location             *Location      `json:"location,omitempty"`
+	Contact              *Contact       `json:"contact,omitempty"`
+	Poll                 *Poll          `json:"poll,omitempty"`
 }
 
 // Content returns a textual representation of the message suitable for LLM analysis.

@@ -18,6 +18,7 @@ type Notifier interface {
 	TaskCreated(ctx context.Context, t *domain.Task)
 	TaskUpdated(ctx context.Context, t *domain.Task)
 	AnalysisFailed(ctx context.Context, rec *domain.AnalysisRecord, contactName string)
+	ForwardFailed(ctx context.Context, rec *domain.AnalysisRecord)
 }
 
 // TriageConfig tunes the triage pipeline.
@@ -53,6 +54,9 @@ type TriageService struct {
 	buffers   map[chatKey]*buffer
 	chatLocks map[chatKey]*sync.Mutex
 	gen       uint64
+	fwd       []domain.Message // forwarded messages waiting for forwardDebounce
+	fwdTimer  *time.Timer
+	fwdGen    uint64
 
 	queue   chan batch
 	wg      sync.WaitGroup
@@ -263,21 +267,25 @@ func (s *TriageService) worker(ctx context.Context) {
 }
 
 func (s *TriageService) process(b batch) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.log.Error("panic in triage", "panic", r)
-		}
-	}()
 	lock := s.chatLock(b.key)
 	lock.Lock()
 	defer lock.Unlock()
+	log := s.log.With("chat_id", b.key.chatID, "batch", len(b.ids))
+	s.runDetached(log, func(ctx context.Context) error { return s.analyze(ctx, b, log) })
+}
 
+// runDetached runs one analysis bounded by the retry budget. The context is detached from shutdown:
+// an in-flight analysis is allowed to finish gracefully. Panics are logged, not propagated.
+func (s *TriageService) runDetached(log *slog.Logger, fn func(context.Context) error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("panic in triage", "panic", r)
+		}
+	}()
 	budget := s.cfg.CallTimeout*time.Duration(s.cfg.MaxRetries+1) + time.Minute
-	// Detached from shutdown: an in-flight analysis is allowed to finish gracefully.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.baseCtx), budget)
 	defer cancel()
-	log := s.log.With("chat_id", b.key.chatID, "batch", len(b.ids))
-	if err := s.analyze(ctx, b, log); err != nil {
+	if err := fn(ctx); err != nil {
 		log.Error("triage failed", "err", err)
 	}
 }

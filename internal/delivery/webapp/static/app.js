@@ -301,6 +301,7 @@ function taskDetailHtml(t) {
       <span class="badge status-${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
       <span class="badge">${PRIORITY_EMOJI[t.priority] || ''} ${PRIORITY_LABEL[t.priority] || t.priority}</span>
       <span class="badge">${CATEGORY_LABEL[t.category] || t.category}</span>
+      ${t.forwarded ? '<span class="badge">📨 Переслано</span>' : ''}
     </div>
     <div class="kv" style="margin-top:10px">
       <div><span>От: </span>${senderLine}</div>
@@ -328,8 +329,10 @@ function isOpen(status) { return status === 'new' || status === 'in_progress' ||
 
 function actionButtons(t) {
   let html = '';
-  if (t.draft_reply) html += `<button class="btn primary full" data-act="draft">🚀 Ответить черновиком</button>`;
-  html += `<button class="btn" data-act="reply-open">✏️ Свой ответ</button>`;
+  if (!t.forwarded) {
+    if (t.draft_reply) html += `<button class="btn primary full" data-act="draft">🚀 Ответить черновиком</button>`;
+    html += `<button class="btn" data-act="reply-open">✏️ Свой ответ</button>`;
+  }
   if (t.status !== 'in_progress') html += `<button class="btn" data-act="work">👀 В работу</button>`;
   html += `<button class="btn" data-act="close">✅ Закрыть</button>`;
   html += `<button class="btn" data-act="snooze-open">⏰ Отложить</button>`;
@@ -337,8 +340,8 @@ function actionButtons(t) {
   return html;
 }
 function reopenButtons(t) {
-  return `<button class="btn primary" data-act="reopen">♻️ Вернуть в работу</button>
-          <button class="btn" data-act="reply-open">✏️ Написать</button>`;
+  return `<button class="btn primary" data-act="reopen">♻️ Вернуть в работу</button>` +
+    (t.forwarded ? '' : `<button class="btn" data-act="reply-open">✏️ Написать</button>`);
 }
 
 function wireTaskDetail(t) {
@@ -375,7 +378,7 @@ async function handleTaskAction(t, action, btn) {
 
 async function handleClose(t) {
   const notify = state.settings ? state.settings.notify_done_on_close : (await loadSettings()).notify_done_on_close;
-  if (!notify) {
+  if (!notify || t.forwarded) {
     await api('POST', `/api/tasks/${t.id}/close`, { send_message: false });
     toast('✅ Задача закрыта');
     renderTaskDetail(t.id);

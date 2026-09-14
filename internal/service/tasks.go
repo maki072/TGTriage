@@ -155,6 +155,9 @@ const DoneMessage = "Готово!"
 // it as an outgoing message. It mutates t in memory (ReplySentAt/ReplyText); the caller persists t
 // and decides the resulting status.
 func (s *TaskService) sendToContact(ctx context.Context, t *domain.Task, text string) error {
+	if !t.HasChat() {
+		return domain.ErrNoSourceChat
+	}
 	conn, err := s.conns.Resolve(ctx, t.ConnectionID)
 	if err != nil {
 		return err

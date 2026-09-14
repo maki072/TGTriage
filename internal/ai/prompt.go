@@ -74,19 +74,21 @@ func sensitivityInstruction(s domain.Sensitivity) string {
 
 // SystemPrompt renders the triage system prompt.
 func SystemPrompt(in TriageInput) string {
-	owner := strings.TrimSpace(in.OwnerName)
+	return strings.NewReplacer(append(ownerPlaceholders(in.OwnerName, in.OwnerAbout),
+		"{{SENSITIVITY}}", sensitivityInstruction(in.Sensitivity))...).Replace(systemPromptTemplate)
+}
+
+// ownerPlaceholders returns replacer pairs for {{OWNER}} and {{ABOUT}}, shared by all system prompts.
+func ownerPlaceholders(name, about string) []string {
+	owner := strings.TrimSpace(name)
 	if owner == "" {
 		owner = "владелец"
 	}
-	about := ""
-	if a := strings.TrimSpace(in.OwnerAbout); a != "" {
-		about = "О владельце: " + a
+	line := ""
+	if a := strings.TrimSpace(about); a != "" {
+		line = "О владельце: " + a
 	}
-	return strings.NewReplacer(
-		"{{OWNER}}", owner,
-		"{{ABOUT}}", about,
-		"{{SENSITIVITY}}", sensitivityInstruction(in.Sensitivity),
-	).Replace(systemPromptTemplate)
+	return []string{"{{OWNER}}", owner, "{{ABOUT}}", line}
 }
 
 // UserPrompt renders the per-batch user message.
@@ -95,9 +97,8 @@ func UserPrompt(in TriageInput) string {
 	if loc == nil {
 		loc = time.UTC
 	}
-	now := in.Now.In(loc)
 	var b strings.Builder
-	fmt.Fprintf(&b, "CURRENT_TIME: %s (%s), часовой пояс %s\n", now.Format("2006-01-02 15:04"), weekdayRU(now.Weekday()), loc.String())
+	writeCurrentTime(&b, in.Now, loc)
 	contact := in.ContactName
 	if in.ContactUsername != "" {
 		contact += " (@" + in.ContactUsername + ")"
@@ -132,6 +133,11 @@ func writeLine(b *strings.Builder, m domain.Message, loc *time.Location) {
 		who = "OWNER"
 	}
 	fmt.Fprintf(b, "[%s] %s: %s\n", m.SentAt.In(loc).Format("02.01 15:04"), who, truncateRunes(m.Text, 4000))
+}
+
+func writeCurrentTime(b *strings.Builder, now time.Time, loc *time.Location) {
+	now = now.In(loc)
+	fmt.Fprintf(b, "CURRENT_TIME: %s (%s), часовой пояс %s\n", now.Format("2006-01-02 15:04"), weekdayRU(now.Weekday()), loc.String())
 }
 
 func weekdayRU(d time.Weekday) string {

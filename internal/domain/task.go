@@ -142,6 +142,10 @@ func (t *Task) LastSourceMessageID() int {
 	return t.SourceMessageIDs[len(t.SourceMessageIDs)-1]
 }
 
+// HasChat reports whether the task is linked to a Business chat, i.e. the owner can reply from the bot.
+// Tasks created from messages forwarded to the bot have no chat.
+func (t *Task) HasChat() bool { return t.ChatID != 0 }
+
 // IsOverdue reports whether an open task has passed its deadline.
 func (t *Task) IsOverdue(now time.Time) bool {
 	return t.Deadline != nil && t.Status.IsOpen() && t.Deadline.Before(now)
