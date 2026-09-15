@@ -174,3 +174,37 @@ func TestHelpdeskTicketWithoutAIStillCreated(t *testing.T) {
 		t.Errorf("an operator's ticket must be created even without AI: %+v", task)
 	}
 }
+
+// TestTriagePauseCoversPersonalChatsOnly: the bot's triage pause is about Business chats; support desk
+// messages follow the helpdesk's own "automatic tickets" switch.
+func TestTriagePauseCoversPersonalChatsOnly(t *testing.T) {
+	ctx := context.Background()
+	s, settings, store, _ := newForwardTestService(t, nil)
+	if _, err := settings.Update(ctx, func(st *domain.Settings) { st.TriagePaused = true }); err != nil {
+		t.Fatal(err)
+	}
+	incoming := func(conn string, chat int64, id int) *domain.Message {
+		t.Helper()
+		m := &domain.Message{ConnectionID: conn, ChatID: chat, MessageID: id, Text: "Не работает 1С", SentAt: time.Now()}
+		if err := s.OnIncoming(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.Messages.Find(ctx, conn, chat, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if m := incoming("biz", 7, 1); !m.Analyzed {
+		t.Error("a paused triage must skip personal messages")
+	}
+	if m := incoming(domain.HelpdeskConnectionID, 42, 1); m.Analyzed {
+		t.Error("the personal triage pause must not stop helpdesk triage")
+	}
+	if _, err := settings.Update(ctx, func(st *domain.Settings) { st.Helpdesk.TriageEnabled = false }); err != nil {
+		t.Fatal(err)
+	}
+	if m := incoming(domain.HelpdeskConnectionID, 42, 2); !m.Analyzed {
+		t.Error("helpdesk messages must be skipped when automatic tickets are off")
+	}
+}

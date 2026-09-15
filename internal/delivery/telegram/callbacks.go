@@ -150,9 +150,9 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 			return err
 		}
 		if st.TriagePaused {
-			answer("⏸ Триаж приостановлен", false)
+			answer("⏸ Личный триаж приостановлен (хелпдеск работает)", false)
 		} else {
-			answer("▶️ Триаж возобновлён", false)
+			answer("▶️ Личный триаж возобновлён", false)
 		}
 		return b.showSettings(ctx, ref)
 	case "smr":

@@ -129,15 +129,20 @@ func (s *TriageService) Wait(timeout time.Duration) bool {
 }
 
 // OnIncoming stores a message from a contact and (re)starts the debounce window of its chat.
+// The triage pause covers personal Business chats; the helpdesk has its own switch.
 func (s *TriageService) OnIncoming(ctx context.Context, m *domain.Message) error {
 	st := s.settings.Get()
+	paused := st.TriagePaused
+	if m.ConnectionID == domain.HelpdeskConnectionID {
+		paused = !st.Helpdesk.TriageEnabled
+	}
 	m.Outgoing = false
-	m.Analyzed = st.TriagePaused
+	m.Analyzed = paused
 	inserted, err := s.messages.Save(ctx, m)
 	if err != nil {
 		return err
 	}
-	if !inserted || st.TriagePaused {
+	if !inserted || paused {
 		return nil
 	}
 	s.add(chatKey{m.ConnectionID, m.ChatID}, m.ID, time.Duration(st.DebounceSeconds)*time.Second,
@@ -305,7 +310,7 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	scope, about := domain.ScopePersonal, st.OwnerAbout
 	var ownerName string
 	if helpdesk {
-		scope, about = domain.ScopeHelpdesk, st.Helpdesk.About
+		scope, about = domain.ScopeHelpdesk, helpdeskAbout(st)
 	} else if conn, err := s.conns.Get(ctx, b.key.connID); err == nil {
 		ownerName = conn.UserName
 	}
@@ -469,7 +474,7 @@ func (s *TriageService) CreateHelpdeskTicket(ctx context.Context, u *domain.Help
 	}
 
 	if len(st.AIChain) > 0 {
-		in := ai.ForwardInput{OwnerAbout: st.Helpdesk.About, Now: time.Now(), Location: loc, Messages: msgs, Helpdesk: true}
+		in := ai.ForwardInput{OwnerAbout: helpdeskAbout(st), Now: time.Now(), Location: loc, Messages: msgs, Helpdesk: true}
 		req := ai.Request{System: ai.ForwardSystemPrompt(in), User: ai.ForwardUserPrompt(in), Schema: ai.AnalysisSchema()}
 		started := time.Now()
 		res, err := s.completeChain(ctx, st, req, log)
@@ -721,6 +726,14 @@ func (s *TriageService) probeEntry(ctx context.Context, i int, entry domain.AIKe
 	}
 	res.Analysis, res.Err = ai.ParseAnalysis(resp.Text)
 	return res
+}
+
+// helpdeskAbout describes the support desk for the LLM; the owner description stands in when it is empty.
+func helpdeskAbout(st domain.Settings) string {
+	if strings.TrimSpace(st.Helpdesk.About) != "" {
+		return st.Helpdesk.About
+	}
+	return st.OwnerAbout
 }
 
 func batchText(msgs []domain.Message) string {

@@ -339,9 +339,9 @@ func (b *Bot) showMainMenu(ctx context.Context, ref *msgRef) error {
 		sb.WriteString("🧠 AI: ❌ нет API-ключей\n")
 	}
 	if st.TriagePaused {
-		sb.WriteString("⏸ Триаж: <b>на паузе</b>")
+		sb.WriteString("⏸ Личный триаж: <b>на паузе</b>")
 	} else {
-		sb.WriteString("▶️ Триаж: активен")
+		sb.WriteString("▶️ Личный триаж: активен")
 	}
 	fmt.Fprintf(&sb, " · дебаунс %d с · чувствительность %s\n", st.DebounceSeconds, sensitivityName(st.Sensitivity))
 	switch {
@@ -391,9 +391,9 @@ func (b *Bot) showSettings(ctx context.Context, ref *msgRef) error {
 	}
 	fmt.Fprintf(&sb, "🌅 Утренний дайджест: <b>%s</b> (%s)\n", digest, esc(b.settings.Location().String()))
 	if st.TriagePaused {
-		sb.WriteString("⏸ Триаж: <b>на паузе</b> — новые сообщения сохраняются, но не анализируются\n")
+		sb.WriteString("⏸ Личный триаж: <b>на паузе</b> — сообщения Business сохраняются, но не анализируются (хелпдеск не затрагивается)\n")
 	} else {
-		sb.WriteString("▶️ Триаж: <b>активен</b>\n")
+		sb.WriteString("▶️ Личный триаж: <b>активен</b>\n")
 	}
 	fmt.Fprintf(&sb, "👁 Отмечать прочитанным при «В работу»: <b>%s</b>\n", yesNo(st.MarkReadOnWork))
 	fmt.Fprintf(&sb, "💬 Спрашивать про «Готово!» при закрытии: <b>%s</b>", yesNo(st.NotifyDoneOnClose))
@@ -422,9 +422,9 @@ func (b *Bot) showSettings(ctx context.Context, ref *msgRef) error {
 	if st.DigestEnabled {
 		digestToggle = "🌅 Дайджест: вкл"
 	}
-	pauseLabel := "⏸ Пауза триажа"
+	pauseLabel := "⏸ Пауза личного триажа"
 	if st.TriagePaused {
-		pauseLabel = "▶️ Возобновить триаж"
+		pauseLabel = "▶️ Возобновить личный триаж"
 	}
 	rows = append(rows,
 		debRow,
