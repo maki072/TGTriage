@@ -12,6 +12,7 @@ import (
 
 // Request is a provider-agnostic structured completion request.
 type Request struct {
+	APIKey    string // key of the chain entry being tried; adapters hold no key of their own
 	Model     string
 	System    string
 	User      string
@@ -67,7 +68,8 @@ func RetryableStatus(code int) bool {
 	return false
 }
 
-// Registry holds configured providers; the active one is chosen at call time (hot switch).
+// Registry holds provider adapters; which one (and with which key) is called is decided per
+// request by the settings' AI chain.
 type Registry struct {
 	mu        sync.RWMutex
 	providers map[string]Provider

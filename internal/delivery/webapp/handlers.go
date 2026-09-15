@@ -221,33 +221,43 @@ func (s *Server) handleSettingsReset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) settingsDTO() Settings {
 	st := s.settings.Get()
 	return Settings{
-		ActiveProvider: st.ActiveProvider, ClaudeModel: st.ClaudeModel, GeminiModel: st.GeminiModel, GroqModel: st.GroqModel,
+		AIChain:     toAIChainDTO(st.AIChain),
+		ClaudeModel: st.ClaudeModel, GeminiModel: st.GeminiModel, GroqModel: st.GroqModel,
 		MistralModel: st.MistralModel, OpenRouterModel: st.OpenRouterModel,
 		DebounceSeconds: st.DebounceSeconds, Sensitivity: string(st.Sensitivity),
 		DigestEnabled: st.DigestEnabled, DigestTime: st.DigestTime, TriagePaused: st.TriagePaused,
 		MarkReadOnWork: st.MarkReadOnWork, NotifyDoneOnClose: st.NotifyDoneOnClose,
-		Providers: s.settings.Providers(), ClaudePresets: s.cfg.ClaudePresets, GeminiPresets: s.cfg.GeminiPresets,
+		Providers: domain.Providers, ClaudePresets: s.cfg.ClaudePresets, GeminiPresets: s.cfg.GeminiPresets,
 		GroqPresets: s.cfg.GroqPresets, MistralPresets: s.cfg.MistralPresets, OpenRouterPresets: s.cfg.OpenRouterPresets,
 	}
 }
 
+// handleProviderTest checks every AI chain entry and reports each one separately.
 func (s *Server) handleProviderTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Minute)
 	defer cancel()
-	res, err := s.triage.Probe(ctx)
+	results, err := s.triage.Probe(ctx)
 	if err != nil {
 		handleErr(w, err)
 		return
 	}
-	out := map[string]any{
-		"provider":   res.Provider,
-		"model":      res.Model,
-		"latency_ms": res.Latency.Milliseconds(),
+	out := make([]map[string]any, 0, len(results))
+	for _, res := range results {
+		item := map[string]any{
+			"index":      res.Index,
+			"provider":   res.Provider,
+			"model":      res.Model,
+			"key_masked": res.KeyMask,
+			"latency_ms": res.Latency.Milliseconds(),
+		}
+		if res.Err != nil {
+			item["error"] = res.Err.Error()
+		} else {
+			item["analysis"] = res.Analysis
+		}
+		out = append(out, item)
 	}
-	if res.Analysis != nil {
-		out["analysis"] = res.Analysis
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{"results": out})
 }
 
 func queryInt(q url.Values, key string, def, minV, maxV int) int {

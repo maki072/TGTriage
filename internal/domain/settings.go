@@ -10,6 +10,33 @@ const (
 	ProviderOpenRouter = "openrouter"
 )
 
+// Providers lists every supported LLM provider in display order.
+var Providers = []string{ProviderClaude, ProviderGemini, ProviderGroq, ProviderMistral, ProviderOpenRouter}
+
+// KnownProvider reports whether p is a supported provider name.
+func KnownProvider(p string) bool {
+	for _, v := range Providers {
+		if v == p {
+			return true
+		}
+	}
+	return false
+}
+
+// AIKey is one entry of the AI fallback chain: a provider and an API key for it.
+type AIKey struct {
+	Provider string `json:"provider"`
+	Key      string `json:"key"`
+}
+
+// MaskKey hides an API key for display, keeping just enough to tell keys apart.
+func MaskKey(key string) string {
+	if len(key) <= 12 {
+		return "…"
+	}
+	return key[:4] + "…" + key[len(key)-4:]
+}
+
 // Sensitivity controls how aggressively messages are classified as tasks.
 type Sensitivity string
 
@@ -41,7 +68,8 @@ func (s Sensitivity) Threshold() float64 {
 
 // Settings are runtime-tunable options (persisted, editable from the bot).
 type Settings struct {
-	ActiveProvider  string
+	// AIChain is tried top to bottom for every LLM call: when an entry fails, the next one is used.
+	AIChain         []AIKey
 	ClaudeModel     string
 	GeminiModel     string
 	GroqModel       string
@@ -75,5 +103,25 @@ func (s Settings) ModelFor(provider string) string {
 	}
 }
 
-// ActiveModel returns model of the active provider.
-func (s Settings) ActiveModel() string { return s.ModelFor(s.ActiveProvider) }
+// Primary returns the first AI chain entry — the one used while it works.
+func (s Settings) Primary() (AIKey, bool) {
+	if len(s.AIChain) == 0 {
+		return AIKey{}, false
+	}
+	return s.AIChain[0], true
+}
+
+// ChainProviders returns the distinct providers of the AI chain in chain order.
+func (s Settings) ChainProviders() []string {
+	var out []string
+	for _, k := range s.AIChain {
+		dup := false
+		for _, p := range out {
+			dup = dup || p == k.Provider
+		}
+		if !dup {
+			out = append(out, k.Provider)
+		}
+	}
+	return out
+}

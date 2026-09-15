@@ -19,7 +19,7 @@ import (
 //   ta:<action>:<id>       task action: draft|reply|work|done|fp|reopen|snz
 //   ts:<id>:<opt>          snooze: minutes|tm (tomorrow 09:00)|c (custom)
 //   tc:<id>:<y|n>          confirm close-with-message: y sends DoneMessage, n closes silently
-//   st, sp:<prov>, sm:<prov>, smp:<prov>:<i>, smc:<prov>, sd:<sec|c>, ss:<sens>,
+//   st, sm:<prov>, smp:<prov>:<i>, smc:<prov>, sd:<sec|c>, ss:<sens>,
 //   sg:<t|c>, stp, smr, sfd, stest, sreset[:y]   settings
 //   dg digest, sx stats, ar:<analysis_id> retry analysis, cx cancel input, noop
 
@@ -82,17 +82,6 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 
 	case "st":
 		b.states.clear()
-		return b.showSettings(ctx, ref)
-	case "sp":
-		provider := arg(1)
-		if !b.settings.HasProvider(provider) {
-			answer("⚠️ Для "+providerTitle(provider)+" не задан API-ключ в переменных окружения", true)
-			return nil
-		}
-		if _, err := b.settings.Update(ctx, func(s *domain.Settings) { s.ActiveProvider = provider }); err != nil {
-			return err
-		}
-		answer("🤖 Активный провайдер: "+providerTitle(provider), false)
 		return b.showSettings(ctx, ref)
 	case "sm":
 		return b.showModelMenu(ctx, ref, arg(1))
@@ -334,26 +323,20 @@ func (b *Bot) closeAction(ctx context.Context, ref *msgRef, id int64, opt string
 func (b *Bot) probe(parent context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 3*time.Minute)
 	defer cancel()
-	res, err := b.triage.Probe(ctx)
+	results, err := b.triage.Probe(ctx)
 	var sb strings.Builder
-	if res != nil {
-		fmt.Fprintf(&sb, "🧪 <b>%s</b> · <code>%s</code> · %.1f с\n\n", providerTitle(res.Provider), esc(res.Model), res.Latency.Seconds())
-	}
+	sb.WriteString("🧪 <b>Проверка ключей AI</b>\n\n")
 	if err != nil {
 		fmt.Fprintf(&sb, "❌ Ошибка: <code>%s</code>", esc(humanError(err)))
-	} else {
-		a := res.Analysis
-		fmt.Fprintf(&sb, "✅ Провайдер работает, JSON валиден.\n\nЗадача: <b>%s</b> · уверенность %.0f%%\n", yesNo(a.IsTask), a.Confidence*100)
-		fmt.Fprintf(&sb, "Тип: %s · приоритет: %s · категория: %s\n", esc(a.MessageType), esc(a.Priority), esc(a.Category))
-		if a.Title != "" {
-			fmt.Fprintf(&sb, "Заголовок: %s\n", esc(a.Title))
+	}
+	for _, r := range results {
+		fmt.Fprintf(&sb, "%d. <b>%s</b> · <code>%s</code> · <code>%s</code> · %.1f с\n",
+			r.Index, providerTitle(r.Provider), esc(r.KeyMask), esc(r.Model), r.Latency.Seconds())
+		if r.Err != nil {
+			fmt.Fprintf(&sb, "❌ <code>%s</code>\n\n", esc(trunc(humanError(r.Err), 300)))
+			continue
 		}
-		if a.Deadline != "" {
-			fmt.Fprintf(&sb, "Дедлайн: %s\n", esc(a.Deadline))
-		}
-		if a.DraftReply != "" {
-			fmt.Fprintf(&sb, "Черновик: <i>%s</i>", esc(a.DraftReply))
-		}
+		fmt.Fprintf(&sb, "✅ работает · задача: %s · уверенность %.0f%%\n\n", yesNo(r.Analysis.IsTask), r.Analysis.Confidence*100)
 	}
 	if err := b.sendText(ctx, sb.String(), kb(row(cb("⚙️ Настройки", "st")))); err != nil {
 		b.log.Warn("send probe result", "err", err)

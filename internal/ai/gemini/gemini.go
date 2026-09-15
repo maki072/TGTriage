@@ -19,7 +19,6 @@ import (
 
 // Config of the Gemini adapter.
 type Config struct {
-	APIKey      string
 	BaseURL     string // default https://generativelanguage.googleapis.com
 	MaxTokens   int    // default 8192 (thinking models spend part of it on reasoning)
 	Temperature float64
@@ -89,8 +88,8 @@ type errorResponse struct {
 }
 
 func (p *Provider) Complete(ctx context.Context, req ai.Request) (*ai.Response, error) {
-	if p.cfg.APIKey == "" {
-		return nil, &ai.Error{Provider: p.Name(), Message: "GEMINI_API_KEY is not set"}
+	if req.APIKey == "" {
+		return nil, &ai.Error{Provider: p.Name(), Message: "API key is not set"}
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
@@ -116,7 +115,7 @@ func (p *Provider) Complete(ctx context.Context, req ai.Request) (*ai.Response, 
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-goog-api-key", p.cfg.APIKey)
+	httpReq.Header.Set("x-goog-api-key", req.APIKey)
 
 	resp, err := p.http.Do(httpReq)
 	if err != nil {

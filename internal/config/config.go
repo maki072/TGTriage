@@ -22,7 +22,7 @@ type Config struct {
 	OwnerAbout     string
 
 	// Socks5Addr, when set (e.g. "127.0.0.1:1080"), routes every outbound call this service makes —
-	// Telegram Bot API and both LLM providers — through that unauthenticated local SOCKS5 proxy.
+	// Telegram Bot API and all LLM providers — through that unauthenticated local SOCKS5 proxy.
 	// For hosts where some or all of these are blocked/censored directly but a local bypass
 	// (Xray/V2Ray etc.) already reaches them. Never applied to the Mini App's own inbound HTTP server.
 	Socks5Addr string
@@ -34,6 +34,8 @@ type Config struct {
 	RetentionDays int
 	DeepLinks     bool
 
+	// Defaults are the settings used until changed in the bot or Mini App. Defaults.AIChain is built
+	// from the *_API_KEY variables (each may hold several comma-separated keys).
 	Defaults domain.Settings
 
 	DebounceMaxWait time.Duration
@@ -47,29 +49,24 @@ type Config struct {
 	AITimeout    time.Duration
 	AIMaxRetries int
 
-	AnthropicAPIKey  string
 	AnthropicBaseURL string
 	ClaudeEffort     string
 	ClaudeFallbacks  bool
 	ClaudeMaxTokens  int
 	ClaudePresets    []string
 
-	GeminiAPIKey    string
 	GeminiBaseURL   string
 	GeminiMaxTokens int
 	GeminiPresets   []string
 
-	GroqAPIKey    string
 	GroqBaseURL   string
 	GroqMaxTokens int
 	GroqPresets   []string
 
-	MistralAPIKey    string
 	MistralBaseURL   string
 	MistralMaxTokens int
 	MistralPresets   []string
 
-	OpenRouterAPIKey    string
 	OpenRouterBaseURL   string
 	OpenRouterMaxTokens int
 	OpenRouterPresets   []string
@@ -128,16 +125,11 @@ func Load() (*Config, error) {
 		OwnerAbout:        os.Getenv("OWNER_ABOUT"),
 		DBPath:            str("DB_PATH", "/var/lib/tg-triage/tgtriage.db"),
 		LogFormat:         strings.ToLower(str("LOG_FORMAT", "json")),
-		AnthropicAPIKey:   os.Getenv("ANTHROPIC_API_KEY"),
 		AnthropicBaseURL:  str("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
 		ClaudeEffort:      str("CLAUDE_EFFORT", "low"),
-		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
 		GeminiBaseURL:     str("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
-		GroqAPIKey:        os.Getenv("GROQ_API_KEY"),
 		GroqBaseURL:       str("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-		MistralAPIKey:     os.Getenv("MISTRAL_API_KEY"),
 		MistralBaseURL:    str("MISTRAL_BASE_URL", "https://api.mistral.ai/v1"),
-		OpenRouterAPIKey:  os.Getenv("OPENROUTER_API_KEY"),
 		OpenRouterBaseURL: str("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
 		ClaudePresets:     list("CLAUDE_MODEL_PRESETS", "claude-opus-5,claude-sonnet-5,claude-haiku-4-5"),
 		GeminiPresets:     list("GEMINI_MODEL_PRESETS", "gemini-3.6-flash,gemini-3.8-flash,gemini-3.1-pro-preview"),
@@ -219,8 +211,18 @@ func Load() (*Config, error) {
 	if !ok {
 		errs = append(errs, errors.New("SENSITIVITY must be low|medium|high"))
 	}
+	primary := strings.ToLower(str("AI_PROVIDER", domain.ProviderClaude))
+	if !domain.KnownProvider(primary) {
+		errs = append(errs, errors.New("AI_PROVIDER must be one of claude, gemini, groq, mistral, openrouter"))
+	}
 	c.Defaults = domain.Settings{
-		ActiveProvider:    strings.ToLower(str("AI_PROVIDER", domain.ProviderClaude)),
+		AIChain: defaultChain(primary, map[string][]string{
+			domain.ProviderClaude:     list("ANTHROPIC_API_KEY", ""),
+			domain.ProviderGemini:     list("GEMINI_API_KEY", ""),
+			domain.ProviderGroq:       list("GROQ_API_KEY", ""),
+			domain.ProviderMistral:    list("MISTRAL_API_KEY", ""),
+			domain.ProviderOpenRouter: list("OPENROUTER_API_KEY", ""),
+		}),
 		ClaudeModel:       str("CLAUDE_MODEL", "claude-opus-5"),
 		GeminiModel:       str("GEMINI_MODEL", "gemini-3.6-flash"),
 		GroqModel:         str("GROQ_MODEL", "openai/gpt-oss-120b"),
@@ -234,20 +236,25 @@ func Load() (*Config, error) {
 		MarkReadOnWork:    boolVar("MARK_READ_ON_WORK", true),
 		NotifyDoneOnClose: boolVar("NOTIFY_DONE_ON_CLOSE", false),
 	}
-	validProvider := map[string]bool{
-		domain.ProviderClaude: true, domain.ProviderGemini: true, domain.ProviderGroq: true,
-		domain.ProviderMistral: true, domain.ProviderOpenRouter: true,
-	}
-	if !validProvider[c.Defaults.ActiveProvider] {
-		errs = append(errs, errors.New("AI_PROVIDER must be one of claude, gemini, groq, mistral, openrouter"))
-	}
 	if !validClock(c.Defaults.DigestTime) {
 		errs = append(errs, errors.New("DIGEST_TIME must be HH:MM"))
 	}
-	if c.AnthropicAPIKey == "" && c.GeminiAPIKey == "" && c.GroqAPIKey == "" && c.MistralAPIKey == "" && c.OpenRouterAPIKey == "" {
-		errs = append(errs, errors.New("at least one provider API key is required (ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY or OPENROUTER_API_KEY)"))
-	}
 	return c, errors.Join(errs...)
+}
+
+// defaultChain orders the env keys into the initial AI chain: AI_PROVIDER's keys first, then the
+// other providers in domain.Providers order, each provider's keys in the order they were listed.
+func defaultChain(primary string, keys map[string][]string) []domain.AIKey {
+	var chain []domain.AIKey
+	for i, p := range append([]string{primary}, domain.Providers...) {
+		if i > 0 && p == primary {
+			continue
+		}
+		for _, k := range keys[p] {
+			chain = append(chain, domain.AIKey{Provider: p, Key: k})
+		}
+	}
+	return chain
 }
 
 func str(key, def string) string {

@@ -23,7 +23,6 @@ const (
 
 // Config of the Claude adapter.
 type Config struct {
-	APIKey     string
 	BaseURL    string        // default https://api.anthropic.com
 	Effort     string        // low|medium|high|xhigh|max; empty = API default
 	Fallbacks  bool          // server-side refusal fallbacks for models that support them
@@ -99,8 +98,8 @@ func supportsFallbacks(model string) bool {
 }
 
 func (p *Provider) Complete(ctx context.Context, req ai.Request) (*ai.Response, error) {
-	if p.cfg.APIKey == "" {
-		return nil, &ai.Error{Provider: p.Name(), Message: "ANTHROPIC_API_KEY is not set"}
+	if req.APIKey == "" {
+		return nil, &ai.Error{Provider: p.Name(), Message: "API key is not set"}
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
@@ -133,7 +132,7 @@ func (p *Provider) Complete(ctx context.Context, req ai.Request) (*ai.Response, 
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.cfg.APIKey)
+	httpReq.Header.Set("x-api-key", req.APIKey)
 	httpReq.Header.Set("anthropic-version", apiVersion)
 	if useFallbacks {
 		httpReq.Header.Set("anthropic-beta", fallbacksBeta)

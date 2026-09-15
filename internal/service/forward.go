@@ -52,12 +52,7 @@ func (s *TriageService) flushForwarded(gen uint64) {
 
 func (s *TriageService) analyzeForwarded(ctx context.Context, msgs []domain.Message, log *slog.Logger) error {
 	st := s.settings.Get()
-	rec := &domain.AnalysisRecord{InputText: forwardedText(msgs), Provider: st.ActiveProvider}
-	provider, ok := s.registry.Get(st.ActiveProvider)
-	if !ok {
-		return s.forwardFailed(ctx, rec, domain.ErrProviderUnset)
-	}
-	rec.Model = st.ModelFor(provider.Name())
+	rec := &domain.AnalysisRecord{InputText: forwardedText(msgs)}
 
 	var ownerName string
 	if conn, err := s.conns.Current(ctx); err == nil {
@@ -70,20 +65,22 @@ func (s *TriageService) analyzeForwarded(ctx context.Context, msgs []domain.Mess
 		Location:   s.cfg.Location,
 		Messages:   msgs,
 	}
-	req := ai.Request{Model: rec.Model, System: ai.ForwardSystemPrompt(in), User: ai.ForwardUserPrompt(in), Schema: ai.AnalysisSchema()}
+	req := ai.Request{System: ai.ForwardSystemPrompt(in), User: ai.ForwardUserPrompt(in), Schema: ai.AnalysisSchema()}
 
 	started := time.Now()
-	resp, analysis, err := s.complete(ctx, provider, req, log)
+	res, err := s.completeChain(ctx, st, req, log)
 	rec.LatencyMs = time.Since(started).Milliseconds()
-	if resp != nil {
-		rec.RawResponse = resp.Text
-		if resp.Model != "" {
-			rec.Model = resp.Model
+	rec.Provider, rec.Model = res.Provider, res.Model
+	if res.Resp != nil {
+		rec.RawResponse = res.Resp.Text
+		if res.Resp.Model != "" {
+			rec.Model = res.Resp.Model
 		}
 	}
 	if err != nil {
 		return s.forwardFailed(ctx, rec, err)
 	}
+	analysis := res.Analysis
 
 	rec.Status = domain.AnalysisOK
 	rec.IsTask = true // the owner has already decided

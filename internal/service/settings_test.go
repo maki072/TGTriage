@@ -49,7 +49,7 @@ var _ domain.SettingsRepository = (*memSettingsRepo)(nil)
 
 func defaultTestSettings() domain.Settings {
 	return domain.Settings{
-		ActiveProvider:  domain.ProviderClaude,
+		AIChain:         []domain.AIKey{{Provider: domain.ProviderClaude, Key: "sk-test-claude-0001"}},
 		ClaudeModel:     "claude-opus-5",
 		GeminiModel:     "gemini-3.6-flash",
 		GroqModel:       "openai/gpt-oss-120b",
@@ -68,7 +68,7 @@ func defaultTestSettings() domain.Settings {
 func TestUpdateWritesOnlyChangedFields(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings(), []string{domain.ProviderClaude, domain.ProviderGemini})
+	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestUpdateWritesOnlyChangedFields(t *testing.T) {
 	// Simulate redeploying with a new env default for a field the user never touched in the bot.
 	newDefaults := defaultTestSettings()
 	newDefaults.GeminiModel = "gemini-3.8-flash"
-	svc2, err := NewSettingsService(ctx, repo, newDefaults, []string{domain.ProviderClaude, domain.ProviderGemini})
+	svc2, err := NewSettingsService(ctx, repo, newDefaults)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestUpdateWritesOnlyChangedFields(t *testing.T) {
 func TestUpdateNoopWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings(), []string{domain.ProviderClaude})
+	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestUpdateNoopWritesNothing(t *testing.T) {
 func TestUpdateRejectsInvalidAndKeepsCurrent(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings(), []string{domain.ProviderClaude})
+	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestUpdateRejectsInvalidAndKeepsCurrent(t *testing.T) {
 func TestResetDropsOverridesButKeepsMeta(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings(), []string{domain.ProviderClaude})
+	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,5 +154,67 @@ func TestResetDropsOverridesButKeepsMeta(t *testing.T) {
 	}
 	if v, err := svc.Meta(ctx, "last_digest"); err != nil || v != "2026-09-14" {
 		t.Errorf("reset must keep meta.* keys, got %q err=%v", v, err)
+	}
+}
+
+func TestLegacyProviderOverridePromotesItsKeys(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemSettingsRepo()
+	repo.data[keyLegacyProvider] = domain.ProviderGemini
+	defaults := defaultTestSettings()
+	defaults.AIChain = append(defaults.AIChain, domain.AIKey{Provider: domain.ProviderGemini, Key: "AIza-test-gemini-01"})
+	svc, err := NewSettingsService(ctx, repo, defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := svc.Get().Primary(); p.Provider != domain.ProviderGemini {
+		t.Errorf("provider chosen before the chain existed must stay first, got chain %+v", svc.Get().AIChain)
+	}
+}
+
+func TestChainPersistsAndSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemSettingsRepo()
+	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := []domain.AIKey{
+		{Provider: " Groq ", Key: " gsk-test-groq-0001 "},
+		{Provider: domain.ProviderClaude, Key: "sk-test-claude-0001"},
+	}
+	if _, err := svc.Update(ctx, func(s *domain.Settings) { s.AIChain = chain }); err != nil {
+		t.Fatal(err)
+	}
+	if chain[0].Key != " gsk-test-groq-0001 " {
+		t.Error("Update must not mutate the caller's slice")
+	}
+	svc2, err := NewSettingsService(ctx, repo, defaultTestSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := svc2.Get().AIChain
+	if len(got) != 2 || got[0] != (domain.AIKey{Provider: domain.ProviderGroq, Key: "gsk-test-groq-0001"}) {
+		t.Errorf("saved chain must be normalized and reloaded as is, got %+v", got)
+	}
+}
+
+func TestUpdateRejectsInvalidChain(t *testing.T) {
+	ctx := context.Background()
+	svc, err := NewSettingsService(ctx, newMemSettingsRepo(), defaultTestSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, chain := range map[string][]domain.AIKey{
+		"unknown provider": {{Provider: "openai", Key: "sk-test-0000000001"}},
+		"empty key":        {{Provider: domain.ProviderGemini, Key: "  "}},
+		"key with space":   {{Provider: domain.ProviderGemini, Key: "AIza test"}},
+	} {
+		if _, err := svc.Update(ctx, func(s *domain.Settings) { s.AIChain = chain }); err == nil {
+			t.Errorf("%s: expected validation error", name)
+		}
+	}
+	if _, err := svc.Update(ctx, func(s *domain.Settings) { s.AIChain = nil }); err != nil {
+		t.Errorf("an empty chain must be allowed: %v", err)
 	}
 }

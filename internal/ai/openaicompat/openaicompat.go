@@ -21,7 +21,6 @@ import (
 // Config of an OpenAI-compatible adapter instance.
 type Config struct {
 	Name        string // domain.Provider* constant — identifies this instance and is used in errors
-	APIKey      string
 	BaseURL     string // e.g. "https://api.groq.com/openai/v1" (no trailing slash needed)
 	MaxTokens   int    // default 8192
 	Temperature float64
@@ -98,8 +97,8 @@ type errorResponse struct {
 }
 
 func (p *Provider) Complete(ctx context.Context, req ai.Request) (*ai.Response, error) {
-	if p.cfg.APIKey == "" {
-		return nil, &ai.Error{Provider: p.Name(), Message: p.Name() + " API key is not set"}
+	if req.APIKey == "" {
+		return nil, &ai.Error{Provider: p.Name(), Message: "API key is not set"}
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
@@ -132,7 +131,7 @@ func (p *Provider) Complete(ctx context.Context, req ai.Request) (*ai.Response, 
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	httpReq.Header.Set("Authorization", "Bearer "+req.APIKey)
 	for k, v := range p.cfg.Headers {
 		httpReq.Header.Set(k, v)
 	}

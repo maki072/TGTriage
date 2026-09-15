@@ -163,7 +163,7 @@ func humanError(err error) string {
 	case errors.Is(err, domain.ErrEmptyReply):
 		return "Текст ответа пуст"
 	case errors.Is(err, domain.ErrProviderUnset):
-		return "AI-провайдер не настроен"
+		return "Не задан ни один API-ключ AI — добавьте в веб-панели (Настройки)"
 	case errors.As(err, &apiErr):
 		return "Telegram: " + apiErr.Description
 	case errors.As(err, &aiErr):

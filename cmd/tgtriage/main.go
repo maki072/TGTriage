@@ -85,57 +85,47 @@ func run(cfg *config.Config, log *slog.Logger) error {
 		}
 	}()
 
+	// Every adapter is registered: API keys are not bound to adapters but come with each request
+	// from the settings' AI chain, which the owner edits at runtime.
 	registry := ai.NewRegistry()
-	if cfg.AnthropicAPIKey != "" {
-		registry.Register(claude.New(claude.Config{
-			APIKey:     cfg.AnthropicAPIKey,
-			BaseURL:    cfg.AnthropicBaseURL,
-			Effort:     cfg.ClaudeEffort,
-			Fallbacks:  cfg.ClaudeFallbacks,
-			MaxTokens:  cfg.ClaudeMaxTokens,
-			Timeout:    cfg.AITimeout,
-			Socks5Addr: cfg.Socks5Addr,
-		}))
-	}
-	if cfg.GeminiAPIKey != "" {
-		registry.Register(gemini.New(gemini.Config{
-			APIKey:      cfg.GeminiAPIKey,
-			BaseURL:     cfg.GeminiBaseURL,
-			MaxTokens:   cfg.GeminiMaxTokens,
-			Temperature: 0.2,
-			Timeout:     cfg.AITimeout,
-			Socks5Addr:  cfg.Socks5Addr,
-		}))
-	}
+	registry.Register(claude.New(claude.Config{
+		BaseURL:    cfg.AnthropicBaseURL,
+		Effort:     cfg.ClaudeEffort,
+		Fallbacks:  cfg.ClaudeFallbacks,
+		MaxTokens:  cfg.ClaudeMaxTokens,
+		Timeout:    cfg.AITimeout,
+		Socks5Addr: cfg.Socks5Addr,
+	}))
+	registry.Register(gemini.New(gemini.Config{
+		BaseURL:     cfg.GeminiBaseURL,
+		MaxTokens:   cfg.GeminiMaxTokens,
+		Temperature: 0.2,
+		Timeout:     cfg.AITimeout,
+		Socks5Addr:  cfg.Socks5Addr,
+	}))
 	// Groq, Mistral and OpenRouter all speak the same OpenAI-compatible Chat Completions wire
 	// format (json_schema structured outputs, Bearer auth) — one adapter, three configurations.
-	if cfg.GroqAPIKey != "" {
-		registry.Register(openaicompat.New(openaicompat.Config{
-			Name: domain.ProviderGroq, APIKey: cfg.GroqAPIKey, BaseURL: cfg.GroqBaseURL,
-			MaxTokens: cfg.GroqMaxTokens, Temperature: 0.2, Timeout: cfg.AITimeout, Socks5Addr: cfg.Socks5Addr,
-		}))
+	registry.Register(openaicompat.New(openaicompat.Config{
+		Name: domain.ProviderGroq, BaseURL: cfg.GroqBaseURL,
+		MaxTokens: cfg.GroqMaxTokens, Temperature: 0.2, Timeout: cfg.AITimeout, Socks5Addr: cfg.Socks5Addr,
+	}))
+	registry.Register(openaicompat.New(openaicompat.Config{
+		Name: domain.ProviderMistral, BaseURL: cfg.MistralBaseURL,
+		MaxTokens: cfg.MistralMaxTokens, Temperature: 0.2, Timeout: cfg.AITimeout, Socks5Addr: cfg.Socks5Addr,
+	}))
+	// OpenRouter attribution headers (optional but recommended by their docs); Referer only
+	// makes sense once the Mini App has a real public URL.
+	headers := map[string]string{"X-Title": "tg-triage"}
+	if cfg.WebAppPublicURL != "" {
+		headers["HTTP-Referer"] = cfg.WebAppPublicURL
 	}
-	if cfg.MistralAPIKey != "" {
-		registry.Register(openaicompat.New(openaicompat.Config{
-			Name: domain.ProviderMistral, APIKey: cfg.MistralAPIKey, BaseURL: cfg.MistralBaseURL,
-			MaxTokens: cfg.MistralMaxTokens, Temperature: 0.2, Timeout: cfg.AITimeout, Socks5Addr: cfg.Socks5Addr,
-		}))
-	}
-	if cfg.OpenRouterAPIKey != "" {
-		// OpenRouter attribution headers (optional but recommended by their docs); Referer only
-		// makes sense once the Mini App has a real public URL.
-		headers := map[string]string{"X-Title": "tg-triage"}
-		if cfg.WebAppPublicURL != "" {
-			headers["HTTP-Referer"] = cfg.WebAppPublicURL
-		}
-		registry.Register(openaicompat.New(openaicompat.Config{
-			Name: domain.ProviderOpenRouter, APIKey: cfg.OpenRouterAPIKey, BaseURL: cfg.OpenRouterBaseURL,
-			MaxTokens: cfg.OpenRouterMaxTokens, Temperature: 0.2, Timeout: cfg.AITimeout, Socks5Addr: cfg.Socks5Addr,
-			Headers: headers,
-		}))
-	}
+	registry.Register(openaicompat.New(openaicompat.Config{
+		Name: domain.ProviderOpenRouter, BaseURL: cfg.OpenRouterBaseURL,
+		MaxTokens: cfg.OpenRouterMaxTokens, Temperature: 0.2, Timeout: cfg.AITimeout, Socks5Addr: cfg.Socks5Addr,
+		Headers: headers,
+	}))
 
-	settings, err := service.NewSettingsService(ctx, store.Settings, cfg.Defaults, registry.Names())
+	settings, err := service.NewSettingsService(ctx, store.Settings, cfg.Defaults)
 	if err != nil {
 		return fmt.Errorf("load settings: %w", err)
 	}
@@ -193,9 +183,15 @@ func run(cfg *config.Config, log *slog.Logger) error {
 	})
 
 	st := settings.Get()
-	log.Info("service started", "version", version, "providers", registry.Names(),
-		"active_provider", st.ActiveProvider, "model", st.ActiveModel(), "timezone", cfg.Location.String(),
+	chain := make([]string, len(st.AIChain))
+	for i, k := range st.AIChain {
+		chain[i] = k.Provider
+	}
+	log.Info("service started", "version", version, "ai_chain", chain, "timezone", cfg.Location.String(),
 		"webapp_addr", cfg.WebAppAddr, "webapp_dev_insecure", cfg.WebAppDevInsecure, "webapp_public_url", cfg.WebAppPublicURL)
+	if len(chain) == 0 {
+		log.Warn("no AI API keys configured: messages are stored but not triaged until keys are added in the Mini App settings")
+	}
 
 	bot.Run(ctx) // blocks until SIGINT/SIGTERM
 

@@ -1,7 +1,10 @@
 package webapp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"tgtriage/internal/domain"
@@ -167,9 +170,31 @@ func toStatsDTO(s *service.Stats) Stats {
 	}
 }
 
+// AIKey is the JSON view of an AI chain entry. The key itself never leaves the server.
+type AIKey struct {
+	Provider  string `json:"provider"`
+	KeyID     string `json:"key_id"`
+	KeyMasked string `json:"key_masked"`
+}
+
+// keyID identifies a stored API key to the Mini App without revealing it: the frontend echoes it
+// back for rows the owner didn't retype, and settingsPatch swaps it for the real key.
+func keyID(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:6])
+}
+
+func toAIChainDTO(chain []domain.AIKey) []AIKey {
+	out := make([]AIKey, len(chain))
+	for i, k := range chain {
+		out[i] = AIKey{Provider: k.Provider, KeyID: keyID(k.Key), KeyMasked: domain.MaskKey(k.Key)}
+	}
+	return out
+}
+
 // Settings is the JSON view of domain.Settings plus the choices available for each field.
 type Settings struct {
-	ActiveProvider    string   `json:"active_provider"`
+	AIChain           []AIKey  `json:"ai_chain"`
 	ClaudeModel       string   `json:"claude_model"`
 	GeminiModel       string   `json:"gemini_model"`
 	GroqModel         string   `json:"groq_model"`
@@ -190,26 +215,48 @@ type Settings struct {
 	OpenRouterPresets []string `json:"openrouter_presets"`
 }
 
+// aiKeyPatch is one row of a saved AI chain: either a newly typed Key, or the KeyID of a key the
+// server already stores (see keyID).
+type aiKeyPatch struct {
+	Provider string `json:"provider"`
+	Key      string `json:"key"`
+	KeyID    string `json:"key_id"`
+}
+
 // settingsPatch is a partial update; nil fields are left untouched.
 type settingsPatch struct {
-	ActiveProvider    *string `json:"active_provider"`
-	ClaudeModel       *string `json:"claude_model"`
-	GeminiModel       *string `json:"gemini_model"`
-	GroqModel         *string `json:"groq_model"`
-	MistralModel      *string `json:"mistral_model"`
-	OpenRouterModel   *string `json:"openrouter_model"`
-	DebounceSeconds   *int    `json:"debounce_seconds"`
-	Sensitivity       *string `json:"sensitivity"`
-	DigestEnabled     *bool   `json:"digest_enabled"`
-	DigestTime        *string `json:"digest_time"`
-	TriagePaused      *bool   `json:"triage_paused"`
-	MarkReadOnWork    *bool   `json:"mark_read_on_work"`
-	NotifyDoneOnClose *bool   `json:"notify_done_on_close"`
+	AIChain           *[]aiKeyPatch `json:"ai_chain"`
+	ClaudeModel       *string       `json:"claude_model"`
+	GeminiModel       *string       `json:"gemini_model"`
+	GroqModel         *string       `json:"groq_model"`
+	MistralModel      *string       `json:"mistral_model"`
+	OpenRouterModel   *string       `json:"openrouter_model"`
+	DebounceSeconds   *int          `json:"debounce_seconds"`
+	Sensitivity       *string       `json:"sensitivity"`
+	DigestEnabled     *bool         `json:"digest_enabled"`
+	DigestTime        *string       `json:"digest_time"`
+	TriagePaused      *bool         `json:"triage_paused"`
+	MarkReadOnWork    *bool         `json:"mark_read_on_work"`
+	NotifyDoneOnClose *bool         `json:"notify_done_on_close"`
 }
 
 func (p settingsPatch) apply(s *domain.Settings) {
-	if p.ActiveProvider != nil {
-		s.ActiveProvider = *p.ActiveProvider
+	if p.AIChain != nil {
+		chain := make([]domain.AIKey, 0, len(*p.AIChain))
+		for _, e := range *p.AIChain {
+			key := strings.TrimSpace(e.Key)
+			if key == "" && e.KeyID != "" {
+				for _, old := range s.AIChain {
+					if keyID(old.Key) == e.KeyID {
+						key = old.Key
+						break
+					}
+				}
+			}
+			// An unresolved row keeps an empty key and is rejected by settings validation.
+			chain = append(chain, domain.AIKey{Provider: e.Provider, Key: key})
+		}
+		s.AIChain = chain
 	}
 	if p.ClaudeModel != nil {
 		s.ClaudeModel = *p.ClaudeModel

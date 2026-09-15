@@ -4,12 +4,14 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"tgtriage/internal/domain"
 )
@@ -17,7 +19,10 @@ import (
 const metaPrefix = "meta."
 
 const (
-	keyProvider        = "ai.provider"
+	keyChain = "ai.chain" // JSON array of domain.AIKey
+	// keyLegacyProvider is the pre-chain "active provider" override. Still honored on load — that
+	// provider's keys move to the front of the .env chain — until the chain itself is saved.
+	keyLegacyProvider  = "ai.provider"
 	keyClaudeModel     = "ai.claude_model"
 	keyGeminiModel     = "ai.gemini_model"
 	keyGroqModel       = "ai.groq_model"
@@ -31,6 +36,9 @@ const (
 	keyDigestTime      = "digest.time"
 	keyNotifyDone      = "task.notify_done_on_close"
 )
+
+// maxChainLen bounds the AI chain: every entry may cost a full retry budget on a bad day.
+const maxChainLen = 20
 
 var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,99}$`)
 
@@ -55,16 +63,15 @@ func ParseClock(s string) (int, int, error) {
 // SettingsService keeps runtime settings in memory, persisted in the DB.
 // Defaults come from environment; values changed via the bot override them.
 type SettingsService struct {
-	repo      domain.SettingsRepository
-	defaults  domain.Settings
-	providers []string
+	repo     domain.SettingsRepository
+	defaults domain.Settings
 
 	mu      sync.RWMutex
 	current domain.Settings
 }
 
-func NewSettingsService(ctx context.Context, repo domain.SettingsRepository, defaults domain.Settings, providers []string) (*SettingsService, error) {
-	s := &SettingsService{repo: repo, defaults: defaults, providers: providers}
+func NewSettingsService(ctx context.Context, repo domain.SettingsRepository, defaults domain.Settings) (*SettingsService, error) {
+	s := &SettingsService{repo: repo, defaults: defaults}
 	if err := s.reload(ctx); err != nil {
 		return nil, err
 	}
@@ -77,8 +84,14 @@ func (s *SettingsService) reload(ctx context.Context) error {
 		return err
 	}
 	cur := s.defaults
-	if v := values[keyProvider]; v != "" {
-		cur.ActiveProvider = v
+	cur.AIChain = slices.Clone(s.defaults.AIChain)
+	if v := values[keyChain]; v != "" {
+		var chain []domain.AIKey
+		if err := json.Unmarshal([]byte(v), &chain); err == nil {
+			cur.AIChain = chain
+		}
+	} else if p := values[keyLegacyProvider]; p != "" {
+		cur.AIChain = promote(cur.AIChain, p)
 	}
 	if v := values[keyClaudeModel]; v != "" {
 		cur.ClaudeModel = v
@@ -118,13 +131,26 @@ func (s *SettingsService) reload(ctx context.Context) error {
 	if b, err := strconv.ParseBool(values[keyNotifyDone]); err == nil {
 		cur.NotifyDoneOnClose = b
 	}
-	if !slices.Contains(s.providers, cur.ActiveProvider) && len(s.providers) > 0 {
-		cur.ActiveProvider = s.providers[0]
-	}
 	s.mu.Lock()
 	s.current = cur
 	s.mu.Unlock()
 	return nil
+}
+
+// promote moves provider's entries to the front of chain, keeping relative order otherwise.
+func promote(chain []domain.AIKey, provider string) []domain.AIKey {
+	out := make([]domain.AIKey, 0, len(chain))
+	for _, k := range chain {
+		if k.Provider == provider {
+			out = append(out, k)
+		}
+	}
+	for _, k := range chain {
+		if k.Provider != provider {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Get returns a snapshot of current settings.
@@ -134,16 +160,11 @@ func (s *SettingsService) Get() domain.Settings {
 	return s.current
 }
 
-// Providers returns names of providers with configured credentials.
-func (s *SettingsService) Providers() []string { return slices.Clone(s.providers) }
-
-// HasProvider reports whether provider is configured.
-func (s *SettingsService) HasProvider(name string) bool { return slices.Contains(s.providers, name) }
-
 // encodeSettings serializes every persisted field to its storage representation.
 func encodeSettings(st domain.Settings) map[string]string {
+	chain, _ := json.Marshal(st.AIChain) // a slice of plain string structs always marshals
 	return map[string]string{
-		keyProvider:        st.ActiveProvider,
+		keyChain:           string(chain),
 		keyClaudeModel:     st.ClaudeModel,
 		keyGeminiModel:     st.GeminiModel,
 		keyGroqModel:       st.GroqModel,
@@ -166,7 +187,13 @@ func (s *SettingsService) Update(ctx context.Context, fn func(*domain.Settings))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := s.current
+	next.AIChain = slices.Clone(s.current.AIChain)
 	fn(&next)
+	next.AIChain = slices.Clone(next.AIChain) // fn may have put in a slice the caller still holds
+	for i := range next.AIChain {
+		next.AIChain[i].Provider = strings.ToLower(strings.TrimSpace(next.AIChain[i].Provider))
+		next.AIChain[i].Key = strings.TrimSpace(next.AIChain[i].Key)
+	}
 	if err := s.validate(next); err != nil {
 		return s.current, err
 	}
@@ -187,8 +214,20 @@ func (s *SettingsService) Update(ctx context.Context, fn func(*domain.Settings))
 }
 
 func (s *SettingsService) validate(st domain.Settings) error {
-	if !slices.Contains(s.providers, st.ActiveProvider) {
-		return fmt.Errorf("%w: provider %q has no API key configured", domain.ErrInvalidInput, st.ActiveProvider)
+	// An empty chain is allowed (triage then reports that no AI is configured): rejecting it would
+	// also block every unrelated setting change on a fresh install without keys.
+	if len(st.AIChain) > maxChainLen {
+		return fmt.Errorf("%w: не больше %d ключей AI", domain.ErrInvalidInput, maxChainLen)
+	}
+	for i, k := range st.AIChain {
+		switch {
+		case !domain.KnownProvider(k.Provider):
+			return fmt.Errorf("%w: строка %d: неизвестный провайдер %q", domain.ErrInvalidInput, i+1, k.Provider)
+		case k.Key == "":
+			return fmt.Errorf("%w: строка %d: пустой API-ключ", domain.ErrInvalidInput, i+1)
+		case len(k.Key) > 512 || strings.ContainsFunc(k.Key, unicode.IsSpace):
+			return fmt.Errorf("%w: строка %d: некорректный API-ключ", domain.ErrInvalidInput, i+1)
+		}
 	}
 	if !ValidModelName(st.ClaudeModel) || !ValidModelName(st.GeminiModel) || !ValidModelName(st.GroqModel) ||
 		!ValidModelName(st.MistralModel) || !ValidModelName(st.OpenRouterModel) {

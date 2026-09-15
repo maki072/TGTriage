@@ -70,6 +70,8 @@ const state = {
   historyFilter: { status: 'done', priority: 'all', offset: 0 },
   settings: null,
   lastTaskList: null,
+  chainDraft: null,  // AI chain rows being edited in settings; survives re-renders until saved
+  chainDirty: false,
 };
 
 const PAGE_SIZE = 20;
@@ -476,7 +478,10 @@ async function renderSettings() {
   let s;
   try { s = await loadSettings(); }
   catch (e) { app.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`; return; }
+  if (!state.chainDirty || !state.chainDraft) state.chainDraft = chainFromSettings(s);
   app.innerHTML = settingsHtml(s);
+  renderChain();
+  setChainDirty(state.chainDirty);
   wireSettings(s);
 }
 
@@ -484,24 +489,83 @@ const PROVIDERS = [
   ['claude', 'Claude'], ['gemini', 'Gemini'], ['groq', 'Groq'], ['mistral', 'Mistral'], ['openrouter', 'OpenRouter'],
 ];
 
+function providerLabel(p) { return PROVIDERS.find(([id]) => id === p)?.[1] || p; }
+
+/* AI chain editor: rows are edited locally (state.chainDraft) and sent together on "Сохранить".
+   Stored keys never reach the browser — a row keeps the server's key_id until a new key is typed. */
+
+function chainFromSettings(s) {
+  return s.ai_chain.map(e => ({ provider: e.provider, key: '', key_id: e.key_id, key_masked: e.key_masked }));
+}
+
+function newChainRow(provider) { return { provider: provider || 'gemini', key: '', key_id: '', key_masked: '' }; }
+
+function chainRowsHtml(draft) {
+  if (!draft.length) return `<div class="empty" style="padding:14px 0">Ключей нет — AI не работает. Добавьте хотя бы один.</div>`;
+  return draft.map((e, i) => `<div class="chain-row" data-i="${i}">
+    <div class="chain-line">
+      <span class="chain-num">${i + 1}</span>
+      <select class="input chain-provider">${PROVIDERS.map(([p, l]) => `<option value="${p}"${p === e.provider ? ' selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="icon-btn" data-chain="up" aria-label="Выше"${i === 0 ? ' disabled' : ''}>▲</button>
+      <button class="icon-btn" data-chain="down" aria-label="Ниже"${i === draft.length - 1 ? ' disabled' : ''}>▼</button>
+      <button class="icon-btn" data-chain="add" aria-label="Добавить строку ниже">＋</button>
+      <button class="icon-btn danger" data-chain="del" aria-label="Удалить строку">−</button>
+    </div>
+    <input class="input chain-key" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+      placeholder="${e.key_id ? 'сохранён ' + esc(e.key_masked) + ' · новый заменит' : 'API-ключ'}" value="${esc(e.key)}">
+  </div>`).join('');
+}
+
+function renderChain() {
+  const box = document.getElementById('chainBox');
+  if (!box) return;
+  box.innerHTML = chainRowsHtml(state.chainDraft);
+  box.querySelectorAll('.chain-row').forEach(rowEl => {
+    const i = Number(rowEl.dataset.i);
+    rowEl.querySelector('.chain-provider').addEventListener('change', ev => { state.chainDraft[i].provider = ev.target.value; setChainDirty(true); });
+    rowEl.querySelector('.chain-key').addEventListener('input', ev => { state.chainDraft[i].key = ev.target.value; setChainDirty(true); });
+    rowEl.querySelectorAll('[data-chain]').forEach(btn => btn.addEventListener('click', () => chainOp(btn.dataset.chain, i)));
+  });
+}
+
+function chainOp(op, i) {
+  const d = state.chainDraft;
+  if (op === 'up' && i > 0) [d[i - 1], d[i]] = [d[i], d[i - 1]];
+  else if (op === 'down' && i < d.length - 1) [d[i + 1], d[i]] = [d[i], d[i + 1]];
+  else if (op === 'add') d.splice(i + 1, 0, newChainRow(d[i].provider));
+  else if (op === 'del') d.splice(i, 1);
+  else return;
+  haptic('light');
+  setChainDirty(true);
+  renderChain();
+}
+
+function setChainDirty(dirty) {
+  state.chainDirty = dirty;
+  const btn = document.getElementById('chainSave');
+  if (btn) { btn.disabled = !dirty; btn.textContent = dirty ? '💾 Сохранить' : '✓ Сохранено'; }
+}
+
 function settingsHtml(s) {
-  const provBtn = (p, label) => `<button class="${p === s.active_provider ? 'active' : ''}" data-provider="${p}">${label}${s.providers.includes(p) ? '' : ' 🔒'}</button>`;
   const debChip = (v) => `<button class="chip${v === s.debounce_seconds ? ' active' : ''}" data-deb="${v}">${v}с</button>`;
   const sensBtn = (v, label) => `<button class="${v === s.sensitivity ? 'active' : ''}" data-sens="${v}">${label}</button>`;
-  const modelRow = (p, label) => `<div class="setting-row">
-      <div><div class="label">Модель ${label}</div></div>
+  const modelRow = (p) => `<div class="setting-row">
+      <div><div class="label">Модель ${providerLabel(p)}</div></div>
       <select class="input" id="model_${p}" data-model-provider="${p}" style="width:auto;max-width:60%">${modelOptions(s[p + '_presets'], s[p + '_model'])}</select>
     </div>`;
-
-  const activeLabel = PROVIDERS.find(([p]) => p === s.active_provider)?.[1] || s.active_provider;
+  const chainProviders = [...new Set(s.ai_chain.map(e => e.provider))];
 
   return `
   <div class="card">
-    <div class="section-title" style="margin-top:0">AI-провайдер</div>
-    <div class="segmented">${PROVIDERS.slice(0, 3).map(([p, l]) => provBtn(p, l)).join('')}</div>
-    <div class="segmented" style="margin-top:6px">${PROVIDERS.slice(3).map(([p, l]) => provBtn(p, l)).join('')}</div>
-    ${modelRow(s.active_provider, activeLabel)}
-    <button class="btn full" id="testProvider" style="margin-top:8px">🧪 Проверить провайдера</button>
+    <div class="section-title" style="margin-top:0">AI-провайдеры</div>
+    <div class="hint-text">Ключи пробуются сверху вниз: если ключ не отвечает, сервер сразу берёт следующий.</div>
+    <div id="chainBox"></div>
+    <div class="actions">
+      <button class="btn" id="chainAdd">＋ Добавить ключ</button>
+      <button class="btn primary" id="chainSave">💾 Сохранить</button>
+    </div>
+    ${chainProviders.map(modelRow).join('')}
+    <button class="btn full" id="testProvider" style="margin-top:8px">🧪 Проверить все ключи</button>
     <div id="testResult"></div>
   </div>
 
@@ -553,10 +617,25 @@ function wireSettings(s) {
     } catch (e) { toast(e.message, true); }
   };
 
-  app.querySelectorAll('[data-provider]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (!s.providers.includes(btn.dataset.provider)) { toast('Нет API-ключа для этого провайдера', true); return; }
-      patch({ active_provider: btn.dataset.provider });
+  document.getElementById('chainAdd').addEventListener('click', () => {
+    const d = state.chainDraft;
+    d.push(newChainRow(d.length ? d[d.length - 1].provider : ''));
+    setChainDirty(true);
+    renderChain();
+    const inputs = app.querySelectorAll('.chain-key');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  });
+  document.getElementById('chainSave').addEventListener('click', async (e) => {
+    const d = state.chainDraft;
+    const bad = d.findIndex(r => !r.key.trim() && !r.key_id);
+    if (bad >= 0) { toast(`Строка ${bad + 1}: введите API-ключ`, true); return; }
+    const ai_chain = d.map(r => r.key.trim() ? { provider: r.provider, key: r.key.trim() } : { provider: r.provider, key_id: r.key_id });
+    await withBusy(e.target, async () => {
+      state.settings = await api('POST', '/api/settings', { ai_chain });
+      state.chainDraft = null;
+      state.chainDirty = false;
+      toast('💾 Ключи AI сохранены');
+      renderSettings();
     });
   });
   app.querySelectorAll('[data-deb]').forEach(btn => btn.addEventListener('click', () => patch({ debounce_seconds: Number(btn.dataset.deb) })));
@@ -582,6 +661,7 @@ function wireSettings(s) {
   digestTime.addEventListener('change', () => patch({ digest_time: digestTime.value }, '🕘 Время дайджеста обновлено'));
 
   document.getElementById('testProvider').addEventListener('click', async (e) => {
+    if (state.chainDirty) { toast('Сначала сохраните ключи — проверяются сохранённые', true); return; }
     const resultEl = document.getElementById('testResult');
     resultEl.innerHTML = `<div class="loading">Проверяю…</div>`;
     await withBusy(e.target, async () => {
@@ -613,17 +693,12 @@ function wireSettings(s) {
 }
 
 function testResultHtml(r) {
-  let html = `<div class="card detail-section" style="margin-top:10px">
-    <h3>${esc(r.provider)} · ${esc(r.model)} · ${(r.latency_ms / 1000).toFixed(1)} с</h3>`;
-  if (r.analysis) {
-    const a = r.analysis;
-    html += `<p>Задача: <b>${a.is_task ? 'да' : 'нет'}</b> · уверенность ${Math.round(a.confidence * 100)}%<br>
-      Тип: ${esc(a.message_type)} · приоритет: ${esc(a.priority)}<br>
-      ${a.title ? 'Заголовок: ' + esc(a.title) + '<br>' : ''}
-      ${a.draft_reply ? 'Черновик: <i>' + esc(a.draft_reply) + '</i>' : ''}</p>`;
-  }
-  html += `</div>`;
-  return html;
+  return `<div class="card detail-section" style="margin-top:10px">` + r.results.map(x => {
+    const head = `${x.index}. ${esc(providerLabel(x.provider))} · ${esc(x.key_masked)} · ${esc(x.model)} · ${(x.latency_ms / 1000).toFixed(1)} с`;
+    if (x.error) return `<p class="probe bad"><b>❌ ${head}</b><br>${esc(x.error)}</p>`;
+    const a = x.analysis;
+    return `<p class="probe ok"><b>✅ ${head}</b><br>работает · задача: ${a.is_task ? 'да' : 'нет'} · уверенность ${Math.round(a.confidence * 100)}%</p>`;
+  }).join('') + `</div>`;
 }
 
 /* ---------------------------------------------------------------------- */

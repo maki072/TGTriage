@@ -37,7 +37,7 @@ type TriageConfig struct {
 	NoisePrefilter bool
 }
 
-// TriageService aggregates incoming messages (debounce), analyzes them with the active LLM
+// TriageService aggregates incoming messages (debounce), analyzes them with the LLM chain
 // and turns actionable requests into tasks.
 type TriageService struct {
 	cfg      TriageConfig
@@ -274,16 +274,18 @@ func (s *TriageService) process(b batch) {
 	s.runDetached(log, func(ctx context.Context) error { return s.analyze(ctx, b, log) })
 }
 
-// runDetached runs one analysis bounded by the retry budget. The context is detached from shutdown:
-// an in-flight analysis is allowed to finish gracefully. Panics are logged, not propagated.
+// runDetached runs one analysis bounded by the retry budget of the whole AI chain. The context is
+// detached from shutdown: an in-flight analysis is allowed to finish gracefully. Panics are logged,
+// not propagated.
 func (s *TriageService) runDetached(log *slog.Logger, fn func(context.Context) error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("panic in triage", "panic", r)
 		}
 	}()
-	budget := s.cfg.CallTimeout*time.Duration(s.cfg.MaxRetries+1) + time.Minute
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.baseCtx), budget)
+	entries := max(1, len(s.settings.Get().AIChain))
+	perEntry := s.cfg.CallTimeout*time.Duration(s.cfg.MaxRetries+1) + 30*time.Second // + backoff pauses
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.baseCtx), perEntry*time.Duration(entries)+time.Minute)
 	defer cancel()
 	if err := fn(ctx); err != nil {
 		log.Error("triage failed", "err", err)
@@ -309,11 +311,9 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	}
 
 	st := s.settings.Get()
-	provider, ok := s.registry.Get(st.ActiveProvider)
-	if !ok {
-		return domain.ErrProviderUnset
+	if len(st.AIChain) == 0 {
+		return domain.ErrProviderUnset // messages stay unanalyzed and are picked up again on restart
 	}
-	model := st.ModelFor(provider.Name())
 
 	var ownerName string
 	if conn, err := s.conns.Get(ctx, b.key.connID); err == nil {
@@ -345,23 +345,22 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 		New:             live,
 		OpenTasks:       openTasks,
 	}
-	req := ai.Request{Model: model, System: ai.SystemPrompt(in), User: ai.UserPrompt(in), Schema: ai.AnalysisSchema()}
+	req := ai.Request{System: ai.SystemPrompt(in), User: ai.UserPrompt(in), Schema: ai.AnalysisSchema()}
 
 	rec := &domain.AnalysisRecord{
 		ConnectionID:  b.key.connID,
 		ChatID:        b.key.chatID,
 		MessageRowIDs: b.ids,
 		InputText:     batchText(live),
-		Provider:      provider.Name(),
-		Model:         model,
 	}
 	started := time.Now()
-	resp, analysis, err := s.complete(ctx, provider, req, log)
+	res, err := s.completeChain(ctx, st, req, log)
 	rec.LatencyMs = time.Since(started).Milliseconds()
-	if resp != nil {
-		rec.RawResponse = resp.Text
-		if resp.Model != "" {
-			rec.Model = resp.Model
+	rec.Provider, rec.Model = res.Provider, res.Model
+	if res.Resp != nil {
+		rec.RawResponse = res.Resp.Text
+		if res.Resp.Model != "" {
+			rec.Model = res.Resp.Model
 		}
 	}
 	if err != nil {
@@ -376,6 +375,7 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 		s.notifier.AnalysisFailed(ctx, rec, first.SenderName)
 		return err
 	}
+	analysis := res.Analysis
 
 	rec.Status = domain.AnalysisOK
 	rec.IsTask = analysis.IsTask
@@ -468,8 +468,64 @@ func (s *TriageService) recordHeuristicNoise(ctx context.Context, b batch, live 
 	return nil
 }
 
-// complete calls the provider with exponential backoff; invalid JSON is retried as well.
-func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Request, log *slog.Logger) (*ai.Response, *domain.Analysis, error) {
+// chainResult is the outcome of running a request down the AI chain.
+type chainResult struct {
+	Provider string // entry that answered, or the last one tried
+	Model    string
+	Resp     *ai.Response // raw response of that entry, if any (set on invalid JSON too)
+	Analysis *domain.Analysis
+}
+
+// completeChain sends req to the AI chain entries in order and returns the first valid analysis.
+// Each entry gets its own key and its provider's model. Errors of all tried entries are reported
+// together, so a failure notice shows why every key was skipped.
+func (s *TriageService) completeChain(ctx context.Context, st domain.Settings, req ai.Request, log *slog.Logger) (chainResult, error) {
+	var (
+		res     chainResult
+		errs    []error
+		lastErr error
+	)
+	if len(st.AIChain) == 0 {
+		return res, domain.ErrProviderUnset
+	}
+	for i, entry := range st.AIChain {
+		if i > 0 && ctx.Err() != nil {
+			errs = append(errs, ctx.Err())
+			break
+		}
+		res.Provider, res.Model, res.Resp = entry.Provider, st.ModelFor(entry.Provider), nil
+		p, ok := s.registry.Get(entry.Provider)
+		if !ok {
+			lastErr = domain.ErrProviderUnset
+			errs = append(errs, fmt.Errorf("#%d %s: %w", i+1, entry.Provider, lastErr))
+			continue
+		}
+		req.APIKey, req.Model = entry.Key, res.Model
+		resp, analysis, err := s.complete(ctx, p, req, i < len(st.AIChain)-1, log)
+		res.Resp = resp
+		if err == nil {
+			if i > 0 {
+				log.Info("AI chain fallback answered", "entry", i+1, "provider", entry.Provider)
+			}
+			res.Analysis = analysis
+			return res, nil
+		}
+		lastErr = err
+		errs = append(errs, fmt.Errorf("#%d %s: %w", i+1, entry.Provider, err))
+		log.Warn("AI chain entry failed", "entry", i+1, "of", len(st.AIChain), "provider", entry.Provider,
+			"key", domain.MaskKey(entry.Key), "err", err)
+	}
+	if len(st.AIChain) == 1 && len(errs) == 1 {
+		return res, lastErr // a single key reads better without the chain numbering
+	}
+	return res, errors.Join(errs...)
+}
+
+// complete calls the provider with exponential backoff; invalid JSON is retried as well. With
+// hasFallback, an HTTP error (quota, auth, region block, 5xx) ends the attempts right away: the
+// next chain entry is a better bet than waiting on this one. Network errors are still retried —
+// they usually hit every entry alike (proxy hiccup).
+func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Request, hasFallback bool, log *slog.Logger) (*ai.Response, *domain.Analysis, error) {
 	var (
 		lastErr  error
 		lastResp *ai.Response
@@ -488,7 +544,8 @@ func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Requ
 		cancel()
 		if err != nil {
 			lastErr = err
-			if !ai.IsRetryable(err) {
+			var pe *ai.Error
+			if !ai.IsRetryable(err) || hasFallback && errors.As(err, &pe) && pe.Status > 0 {
 				break
 			}
 			log.Warn("LLM call failed, retrying", "attempt", attempt+1, "err", err)
@@ -529,19 +586,22 @@ func (s *TriageService) merge(t *domain.Task, a *domain.Analysis, live []domain.
 	t.SourceMessageIDs = append(t.SourceMessageIDs, telegramIDs(live)...)
 }
 
-// ProbeResult is the outcome of a provider health check.
+// ProbeResult is the outcome of checking one AI chain entry.
 type ProbeResult struct {
+	Index    int // 1-based position in the chain
 	Provider string
 	Model    string
+	KeyMask  string
 	Latency  time.Duration
-	Analysis *domain.Analysis
+	Analysis *domain.Analysis // set when Err is nil
+	Err      error
 }
 
-// Probe runs a synthetic triage through the active provider (settings "test" button).
-func (s *TriageService) Probe(ctx context.Context) (*ProbeResult, error) {
+// Probe runs a synthetic triage through every AI chain entry at once (settings "test" button), so
+// the owner sees which keys work rather than only whether the chain as a whole does.
+func (s *TriageService) Probe(ctx context.Context) ([]ProbeResult, error) {
 	st := s.settings.Get()
-	p, ok := s.registry.Get(st.ActiveProvider)
-	if !ok {
+	if len(st.AIChain) == 0 {
 		return nil, domain.ErrProviderUnset
 	}
 	now := time.Now()
@@ -557,21 +617,35 @@ func (s *TriageService) Probe(ctx context.Context) (*ProbeResult, error) {
 			{Text: "Можешь глянуть до конца дня? Клиенты жалуются", SentAt: now.Add(-20 * time.Second)},
 		},
 	}
-	res := &ProbeResult{Provider: p.Name(), Model: st.ModelFor(p.Name())}
+	req := ai.Request{System: ai.SystemPrompt(in), User: ai.UserPrompt(in), Schema: ai.AnalysisSchema()}
+	results := make([]ProbeResult, len(st.AIChain))
+	var wg sync.WaitGroup
+	for i, entry := range st.AIChain {
+		wg.Go(func() { results[i] = s.probeEntry(ctx, i, entry, st.ModelFor(entry.Provider), req) })
+	}
+	wg.Wait()
+	return results, nil
+}
+
+func (s *TriageService) probeEntry(ctx context.Context, i int, entry domain.AIKey, model string, req ai.Request) ProbeResult {
+	res := ProbeResult{Index: i + 1, Provider: entry.Provider, Model: model, KeyMask: domain.MaskKey(entry.Key)}
+	p, ok := s.registry.Get(entry.Provider)
+	if !ok {
+		res.Err = domain.ErrProviderUnset
+		return res
+	}
+	req.APIKey, req.Model = entry.Key, model
 	started := time.Now()
 	callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
 	defer cancel()
-	resp, err := p.Complete(callCtx, ai.Request{Model: res.Model, System: ai.SystemPrompt(in), User: ai.UserPrompt(in), Schema: ai.AnalysisSchema()})
+	resp, err := p.Complete(callCtx, req)
 	res.Latency = time.Since(started)
 	if err != nil {
-		return res, err
+		res.Err = err
+		return res
 	}
-	a, err := ai.ParseAnalysis(resp.Text)
-	if err != nil {
-		return res, err
-	}
-	res.Analysis = a
-	return res, nil
+	res.Analysis, res.Err = ai.ParseAnalysis(resp.Text)
+	return res
 }
 
 func batchText(msgs []domain.Message) string {

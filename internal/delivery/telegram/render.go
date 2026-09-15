@@ -319,7 +319,15 @@ func (b *Bot) showMainMenu(ctx context.Context, ref *msgRef) error {
 	default:
 		fmt.Fprintf(&sb, "🔗 Telegram Business: ✅ %s · ответы: %s\n", esc(c.UserName), yesNo(c.CanReply))
 	}
-	fmt.Fprintf(&sb, "🧠 AI: <b>%s</b> · <code>%s</code>\n", providerTitle(st.ActiveProvider), esc(st.ActiveModel()))
+	if k, ok := st.Primary(); ok {
+		fmt.Fprintf(&sb, "🧠 AI: <b>%s</b> · <code>%s</code>", providerTitle(k.Provider), esc(st.ModelFor(k.Provider)))
+		if n := len(st.AIChain) - 1; n > 0 {
+			fmt.Fprintf(&sb, " · резервных ключей: %d", n)
+		}
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString("🧠 AI: ❌ нет API-ключей\n")
+	}
 	if st.TriagePaused {
 		sb.WriteString("⏸ Триаж: <b>на паузе</b>")
 	} else {
@@ -346,20 +354,17 @@ func (b *Bot) showMainMenu(ctx context.Context, ref *msgRef) error {
 
 func (b *Bot) showSettings(ctx context.Context, ref *msgRef) error {
 	st := b.settings.Get()
-	keyNote := func(p string) string {
-		if b.settings.HasProvider(p) {
-			return ""
-		}
-		return " <i>(нет API-ключа)</i>"
-	}
 	var sb strings.Builder
 	sb.WriteString("⚙️ <b>Настройки</b>\n\n")
-	fmt.Fprintf(&sb, "🤖 Активный провайдер: <b>%s</b>\n", providerTitle(st.ActiveProvider))
-	fmt.Fprintf(&sb, "   • Claude: <code>%s</code>%s\n", esc(st.ClaudeModel), keyNote(domain.ProviderClaude))
-	fmt.Fprintf(&sb, "   • Gemini: <code>%s</code>%s\n", esc(st.GeminiModel), keyNote(domain.ProviderGemini))
-	fmt.Fprintf(&sb, "   • Groq: <code>%s</code>%s\n", esc(st.GroqModel), keyNote(domain.ProviderGroq))
-	fmt.Fprintf(&sb, "   • Mistral: <code>%s</code>%s\n", esc(st.MistralModel), keyNote(domain.ProviderMistral))
-	fmt.Fprintf(&sb, "   • OpenRouter: <code>%s</code>%s\n", esc(st.OpenRouterModel), keyNote(domain.ProviderOpenRouter))
+	sb.WriteString("🤖 <b>AI по очереди</b> — если ключ не отвечает, берётся следующий:\n")
+	if len(st.AIChain) == 0 {
+		sb.WriteString("   ❌ ключей нет — триаж не работает\n")
+	}
+	for i, k := range st.AIChain {
+		fmt.Fprintf(&sb, "   %d. %s · <code>%s</code> · <code>%s</code>\n",
+			i+1, providerTitle(k.Provider), esc(domain.MaskKey(k.Key)), esc(st.ModelFor(k.Provider)))
+	}
+	sb.WriteString("   <i>Ключи и порядок меняются в веб-панели</i>\n")
 	fmt.Fprintf(&sb, "⏱ Дебаунс (склейка сообщений): <b>%d с</b>\n", st.DebounceSeconds)
 	fmt.Fprintf(&sb, "🎯 Чувствительность: <b>%s</b> (порог уверенности %.2f)\n", sensitivityName(st.Sensitivity), st.Sensitivity.Threshold())
 	digest := "выкл"
@@ -375,8 +380,17 @@ func (b *Bot) showSettings(ctx context.Context, ref *msgRef) error {
 	fmt.Fprintf(&sb, "👁 Отмечать прочитанным при «В работу»: <b>%s</b>\n", yesNo(st.MarkReadOnWork))
 	fmt.Fprintf(&sb, "💬 Спрашивать про «Готово!» при закрытии: <b>%s</b>", yesNo(st.NotifyDoneOnClose))
 
-	provBtn := func(p string) button {
-		return cb(mark(st.ActiveProvider == p, "🤖 "+providerTitle(p)), "sp:"+p)
+	var rows [][]button
+	var modelRow []button
+	for _, p := range st.ChainProviders() {
+		modelRow = append(modelRow, cb("✏️ "+providerTitle(p), "sm:"+p))
+		if len(modelRow) == 3 {
+			rows = append(rows, modelRow)
+			modelRow = nil
+		}
+	}
+	if len(modelRow) > 0 {
+		rows = append(rows, modelRow)
 	}
 	var debRow []button
 	for _, s := range []int{10, 20, 30, 60} {
@@ -394,19 +408,19 @@ func (b *Bot) showSettings(ctx context.Context, ref *msgRef) error {
 	if st.TriagePaused {
 		pauseLabel = "▶️ Возобновить триаж"
 	}
-	return b.render(ctx, ref, sb.String(), kb(
-		row(provBtn(domain.ProviderClaude), provBtn(domain.ProviderGemini), provBtn(domain.ProviderGroq)),
-		row(provBtn(domain.ProviderMistral), provBtn(domain.ProviderOpenRouter)),
-		row(cb("✏️ Claude", "sm:claude"), cb("✏️ Gemini", "sm:gemini"), cb("✏️ Groq", "sm:groq")),
-		row(cb("✏️ Mistral", "sm:mistral"), cb("✏️ OpenRouter", "sm:openrouter")),
+	rows = append(rows,
 		debRow,
 		row(sensBtn(domain.SensitivityLow, "🎯 Низкая"), sensBtn(domain.SensitivityMedium, "Средняя"), sensBtn(domain.SensitivityHigh, "Высокая")),
 		row(cb(digestToggle, "sg:t"), cb("🕘 Время дайджеста", "sg:c")),
 		row(cb(pauseLabel, "stp"), cb("👁 Прочитано: "+yesNo(st.MarkReadOnWork), "smr")),
 		row(cb("💬 «Готово!» при закрытии: "+yesNo(st.NotifyDoneOnClose), "sfd")),
-		row(cb("🧪 Проверить провайдера", "stest")),
-		row(cb("♻️ Сброс к .env", "sreset"), cb("🏠 Меню", "m")),
-	))
+		row(cb("🧪 Проверить ключи AI", "stest")),
+	)
+	if b.cfg.WebAppURL != "" {
+		rows = append(rows, row(webAppButton("🔑 Ключи AI — в веб-панели", b.cfg.WebAppURL)))
+	}
+	rows = append(rows, row(cb("♻️ Сброс к .env", "sreset"), cb("🏠 Меню", "m")))
+	return b.render(ctx, ref, sb.String(), &telegram.InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
 func (b *Bot) presets(provider string) []string {
