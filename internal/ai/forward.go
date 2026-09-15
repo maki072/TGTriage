@@ -15,6 +15,8 @@ type ForwardInput struct {
 	Now        time.Time
 	Location   *time.Location
 	Messages   []domain.Message // oldest first; Outgoing marks messages written by the owner
+	// Helpdesk: an operator marked support messages as a ticket; OwnerAbout describes the service.
+	Helpdesk bool
 }
 
 // forwardSystemPromptTemplate turns forwarded messages into a task. Placeholders: {{OWNER}}, {{ABOUT}}.
@@ -38,6 +40,9 @@ const forwardSystemPromptTemplate = `Ты — персональный асси�
 
 // ForwardSystemPrompt renders the system prompt for forwarded messages.
 func ForwardSystemPrompt(in ForwardInput) string {
+	if in.Helpdesk {
+		return helpdeskTicketPrompt(in)
+	}
 	return strings.NewReplacer(ownerPlaceholders(in.OwnerName, in.OwnerAbout)...).Replace(forwardSystemPromptTemplate)
 }
 
@@ -52,6 +57,9 @@ func ForwardUserPrompt(in ForwardInput) string {
 	b.WriteString("\n<forwarded_messages>\n")
 	for _, m := range in.Messages {
 		who := "OWNER"
+		if in.Helpdesk {
+			who = "SUPPORT"
+		}
 		if !m.Outgoing {
 			who = m.SenderName
 			if m.SenderUsername != "" {

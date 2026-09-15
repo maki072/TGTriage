@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"tgtriage/internal/ai"
 	"tgtriage/internal/domain"
@@ -32,7 +33,7 @@ func handleErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, domain.ErrInvalidInput):
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), domain.ErrInvalidInput.Error()+": "))
 	case errors.Is(err, domain.ErrEmptyReply):
 		writeError(w, http.StatusBadRequest, "reply text is empty")
 	case errors.Is(err, domain.ErrNoConnection):
@@ -42,7 +43,15 @@ func handleErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrNoSourceChat):
 		writeError(w, http.StatusConflict, "the task was created from a forwarded message and has no chat to reply to")
 	case errors.Is(err, domain.ErrProviderUnset):
-		writeError(w, http.StatusConflict, "no AI provider is configured")
+		writeError(w, http.StatusConflict, "не задан ни один API-ключ AI")
+	case errors.Is(err, domain.ErrHelpdeskOff):
+		writeError(w, http.StatusConflict, "хелпдеск выключен или не указана группа")
+	case errors.Is(err, domain.ErrUserBlocked):
+		writeError(w, http.StatusConflict, "пользователь заблокировал бота — сообщение не доставлено")
+	case errors.Is(err, domain.ErrTopicGone):
+		writeError(w, http.StatusConflict, "тема пользователя удалена в группе")
+	case errors.Is(err, domain.ErrForbidden):
+		writeError(w, http.StatusForbidden, "нет доступа")
 	case errors.As(err, &apiErr):
 		writeError(w, http.StatusBadGateway, "Telegram: "+apiErr.Description)
 	case errors.As(err, &aiErr):

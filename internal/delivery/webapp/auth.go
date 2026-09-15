@@ -72,3 +72,24 @@ func validateInitData(botToken, initData string) (userID int64, ok bool) {
 	}
 	return user.ID, true
 }
+
+// initDataUserName returns the display name of the launching user from already validated initData.
+func initDataUserName(initData string) string {
+	values, err := url.ParseQuery(initData)
+	if err != nil {
+		return ""
+	}
+	var user struct {
+		FirstName string `json:"first_name"`
+		LastName  string `json:"last_name"`
+		Username  string `json:"username"`
+	}
+	if json.Unmarshal([]byte(values.Get("user")), &user) != nil {
+		return ""
+	}
+	name := strings.TrimSpace(user.FirstName + " " + user.LastName)
+	if name == "" && user.Username != "" {
+		name = "@" + user.Username
+	}
+	return name
+}

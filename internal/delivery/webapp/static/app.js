@@ -12,24 +12,17 @@ if (tg) {
   tg.expand();
   applyTheme();
   tg.onEvent('themeChanged', applyTheme);
-} else {
-  document.getElementById('devBanner').hidden = false;
 }
+if (!inTelegram) document.getElementById('devBanner').hidden = false;
 
 function applyTheme() {
   const p = tg.themeParams || {};
   const root = document.documentElement.style;
   const map = {
-    bg: p.bg_color, secondaryBg: p.secondary_bg_color || p.bg_color, text: p.text_color,
-    hint: p.hint_color, link: p.link_color, button: p.button_color, buttonText: p.button_text_color,
+    '--bg': p.bg_color, '--secondary-bg': p.secondary_bg_color || p.bg_color, '--text': p.text_color,
+    '--hint': p.hint_color, '--link': p.link_color, '--button': p.button_color, '--button-text': p.button_text_color,
   };
-  if (map.bg) root.setProperty('--bg', map.bg);
-  if (map.secondaryBg) root.setProperty('--secondary-bg', map.secondaryBg);
-  if (map.text) root.setProperty('--text', map.text);
-  if (map.hint) root.setProperty('--hint', map.hint);
-  if (map.link) root.setProperty('--link', map.link);
-  if (map.button) root.setProperty('--button', map.button);
-  if (map.buttonText) root.setProperty('--button-text', map.buttonText);
+  Object.entries(map).forEach(([k, v]) => { if (v) root.setProperty(k, v); });
   if (tg.setHeaderColor) try { tg.setHeaderColor(p.secondary_bg_color ? 'secondary_bg_color' : 'bg_color'); } catch (e) {}
   if (tg.setBackgroundColor) try { tg.setBackgroundColor(p.bg_color || '#f2f2f7'); } catch (e) {}
 }
@@ -42,6 +35,13 @@ function haptic(kind) {
   } catch (e) {}
 }
 
+function openLink(url) {
+  if (!url) return;
+  if (tg && url.startsWith('https://t.me/') && tg.openTelegramLink) { try { tg.openTelegramLink(url); return; } catch (e) {} }
+  if (tg && tg.openLink && url.startsWith('http')) { try { tg.openLink(url); return; } catch (e) {} }
+  window.open(url, '_blank');
+}
+
 /* ---------------------------------------------------------------------- */
 /* API helper                                                             */
 /* ---------------------------------------------------------------------- */
@@ -52,10 +52,7 @@ async function api(method, path, body) {
   const res = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
   let data = null;
   try { data = await res.json(); } catch (e) {}
-  if (!res.ok) {
-    const msg = (data && data.error) || ('HTTP ' + res.status);
-    throw new Error(msg);
-  }
+  if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
   return data;
 }
 
@@ -64,29 +61,47 @@ async function api(method, path, body) {
 /* ---------------------------------------------------------------------- */
 
 const state = {
-  tab: 'tasks',
-  taskId: null,
-  tasksFilter: { status: 'act', priority: 'all', offset: 0 },
-  historyFilter: { status: 'done', priority: 'all', offset: 0 },
+  me: null,
+  tab: null,
+  view: null,            // {type: 'task'|'user', id}
+  back: [],              // view stack
+  tasksFilter: { status: 'act', priority: 'all', scope: 'all', offset: 0 },
+  historyFilter: { status: 'done', priority: 'all', scope: 'all', offset: 0 },
+  dialogsFilter: { filter: 'awaiting', q: '', offset: 0 },
   settings: null,
-  lastTaskList: null,
-  chainDraft: null,  // AI chain rows being edited in settings; survives re-renders until saved
+  chainDraft: null,
   chainDirty: false,
+  openGroups: new Set(['helpdesk']),
 };
 
 const PAGE_SIZE = 20;
-
 const app = document.getElementById('app');
 const topTitle = document.getElementById('topTitle');
 const backBtn = document.getElementById('backBtn');
-const refreshBtn = document.getElementById('refreshBtn');
 
-document.querySelectorAll('.tab').forEach(btn => {
-  btn.addEventListener('click', () => { state.taskId = null; switchTab(btn.dataset.tab); });
-});
-backBtn.addEventListener('click', closeDetail);
-refreshBtn.addEventListener('click', () => render());
-if (tg && tg.BackButton) tg.BackButton.onClick(closeDetail);
+backBtn.addEventListener('click', goBack);
+document.getElementById('refreshBtn').addEventListener('click', () => render());
+if (tg && tg.BackButton) tg.BackButton.onClick(goBack);
+
+function isOwner() { return state.me && state.me.role === 'owner'; }
+
+function tabsForMe() {
+  const tabs = [];
+  if (!isOwner() || state.me.helpdesk_enabled) tabs.push(['dialogs', '💬', 'Диалоги']);
+  tabs.push(['tasks', isOwner() ? '🗂' : '🎫', isOwner() ? 'Задачи' : 'Тикеты']);
+  tabs.push(['history', '🕘', 'История']);
+  if (isOwner()) tabs.push(['settings', '⚙️', 'Настройки']);
+  return tabs;
+}
+
+function buildTabbar() {
+  const bar = document.getElementById('tabbar');
+  bar.innerHTML = tabsForMe().map(([id, icon, label]) =>
+    `<button class="tab" data-tab="${id}"><span class="tab-icon">${icon}</span><span>${label}</span></button>`).join('');
+  bar.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+    state.view = null; state.back = []; switchTab(btn.dataset.tab);
+  }));
+}
 
 function switchTab(tab) {
   state.tab = tab;
@@ -94,24 +109,31 @@ function switchTab(tab) {
   render();
 }
 
-function openDetail(id) {
-  state.taskId = id;
+function openView(v) {
+  if (state.view) state.back.push(state.view);
+  state.view = v;
   render();
+  window.scrollTo(0, 0);
 }
 
-function closeDetail() {
-  if (state.taskId == null) return;
-  state.taskId = null;
+function goBack() {
+  if (!state.view) return;
+  state.view = state.back.pop() || null;
   render();
 }
 
 function render() {
-  backBtn.hidden = state.taskId == null;
-  if (tg && tg.BackButton) { if (state.taskId != null) tg.BackButton.show(); else tg.BackButton.hide(); }
-
-  if (state.taskId != null) { topTitle.textContent = 'Задача #' + state.taskId; renderTaskDetail(state.taskId); return; }
+  const detail = state.view != null;
+  backBtn.hidden = !detail;
+  if (tg && tg.BackButton) { if (detail) tg.BackButton.show(); else tg.BackButton.hide(); }
+  if (detail) {
+    if (state.view.type === 'task') { topTitle.textContent = 'Задача #' + state.view.id; renderTaskDetail(state.view.id); }
+    else { topTitle.textContent = 'Диалог'; renderDialog(state.view.id); }
+    return;
+  }
   switch (state.tab) {
-    case 'tasks': topTitle.textContent = 'Задачи'; renderTaskList('tasks'); break;
+    case 'dialogs': topTitle.textContent = 'Диалоги'; renderDialogs(); break;
+    case 'tasks': topTitle.textContent = isOwner() ? 'Задачи' : 'Тикеты'; renderTaskList('tasks'); break;
     case 'history': topTitle.textContent = 'История'; renderTaskList('history'); break;
     case 'settings': topTitle.textContent = 'Настройки'; renderSettings(); break;
   }
@@ -130,11 +152,26 @@ function fmtDT(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return iso;
   const now = new Date();
-  const sameYear = d.getFullYear() === now.getFullYear();
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
   return d.toLocaleString('ru-RU', {
-    day: '2-digit', month: '2-digit', year: sameYear ? undefined : '2-digit',
+    day: '2-digit', month: '2-digit', year: d.getFullYear() === now.getFullYear() ? undefined : '2-digit',
     hour: '2-digit', minute: '2-digit',
   });
+}
+
+function waitedFor(iso) {
+  if (!iso) return '';
+  const m = Math.max(1, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (m < 60) return m + ' мин';
+  if (m < 1440) return Math.floor(m / 60) + ' ч ' + (m % 60) + ' мин';
+  return Math.floor(m / 1440) + ' дн';
+}
+
+function fmtSize(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' МБ';
+  if (n >= 1024) return Math.round(n / 1024) + ' КБ';
+  return n + ' Б';
 }
 
 const PRIORITY_LABEL = { critical: 'Критический', high: 'Высокий', medium: 'Средний', low: 'Низкий' };
@@ -150,7 +187,7 @@ function toast(msg, isError) {
   el.hidden = false;
   haptic(isError ? 'error' : 'success');
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.hidden = true; }, 2600);
+  toast._t = setTimeout(() => { el.hidden = true; }, 2800);
 }
 
 function showModal(html, onMount) {
@@ -161,11 +198,141 @@ function showModal(html, onMount) {
 }
 function closeModal() { document.getElementById('modalRoot').innerHTML = ''; }
 
+function confirmModal(title, text, okLabel, danger) {
+  return new Promise(resolve => {
+    showModal(`<h3>${esc(title)}</h3><p class="hint-text" style="margin:0">${esc(text)}</p>
+      <div class="actions"><button class="btn ${danger ? 'danger' : 'primary'} full" id="mOk">${esc(okLabel)}</button>
+      <button class="btn ghost full" id="mNo">Отмена</button></div>`, root => {
+      root.querySelector('#mOk').addEventListener('click', () => { closeModal(); resolve(true); });
+      root.querySelector('#mNo').addEventListener('click', () => { closeModal(); resolve(false); });
+    });
+  });
+}
+
 async function withBusy(btn, fn) {
   if (btn) btn.disabled = true;
   try { await fn(); }
   catch (e) { toast(e.message || String(e), true); }
   finally { if (btn) btn.disabled = false; }
+}
+
+function chipRow(name, options, active) {
+  return `<div class="chiprow" data-chips="${name}">` +
+    options.map(([v, label]) => `<button class="chip${v === active ? ' active' : ''}" data-value="${esc(v)}">${esc(label)}</button>`).join('') +
+    `</div>`;
+}
+function wireChips(name, onPick) {
+  document.querySelectorAll(`[data-chips="${name}"] .chip`).forEach(btn => btn.addEventListener('click', () => onPick(btn.dataset.value)));
+}
+
+/* ---------------------------------------------------------------------- */
+/* Dialogs (helpdesk users)                                               */
+/* ---------------------------------------------------------------------- */
+
+async function renderDialogs() {
+  const f = state.dialogsFilter;
+  if (!state.me.helpdesk) {
+    app.innerHTML = `<div class="card empty">🎧 Хелпдеск ${state.me.helpdesk_enabled ? 'включён, но не указана супергруппа' : 'выключен'}.` +
+      (isOwner() ? `<br><br><button class="btn primary" id="goSettings">Открыть настройки</button>` : '') + `</div>`;
+    const b = document.getElementById('goSettings');
+    if (b) b.addEventListener('click', () => { state.openGroups.add('helpdesk'); switchTab('settings'); });
+    return;
+  }
+  app.innerHTML = chipRow('dfilter', [['awaiting', '⏳ Ждут ответа'], ['all', 'Все']], f.filter) +
+    `<input class="input search" id="dq" type="search" placeholder="Поиск по имени, @username или ID" value="${esc(f.q)}">` +
+    `<div id="listBody" class="loading">Загрузка…</div>`;
+  wireChips('dfilter', v => { f.filter = v; f.offset = 0; renderDialogs(); });
+  const q = document.getElementById('dq');
+  q.addEventListener('change', () => { f.q = q.value.trim(); f.offset = 0; renderDialogs(); });
+  try {
+    const data = await api('GET', `/api/helpdesk/users?filter=${f.filter}&q=${encodeURIComponent(f.q)}&limit=${PAGE_SIZE}&offset=${f.offset}`);
+    const body = document.getElementById('listBody');
+    body.classList.remove('loading');
+    if (!data.items.length) {
+      body.innerHTML = `<div class="empty">${f.filter === 'awaiting' ? 'Все ответы отправлены 🎉' : 'Пока никто не писал'}</div>`;
+      return;
+    }
+    body.innerHTML = data.items.map(dialogCard).join('') + pager(data, 'dpage');
+    body.querySelectorAll('[data-user]').forEach(el => el.addEventListener('click', () => openView({ type: 'user', id: Number(el.dataset.user) })));
+    body.querySelectorAll('[data-dpage]').forEach(el => el.addEventListener('click', () => { f.offset = Number(el.dataset.dpage); renderDialogs(); }));
+  } catch (e) {
+    document.getElementById('listBody').innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`;
+  }
+}
+
+function userBadges(u) {
+  const b = [];
+  if (u.awaiting_since) b.push(`<span class="badge warn">⏳ ждёт ${waitedFor(u.awaiting_since)}</span>`);
+  if (u.blocked) b.push(`<span class="badge bad">🚫 заблокировал бота</span>`);
+  if (u.topic_closed) b.push(`<span class="badge">🔒 тема закрыта</span>`);
+  if (u.source) b.push(`<span class="badge">🔗 ${esc(u.source)}</span>`);
+  return b.join(' ');
+}
+
+function dialogCard(u) {
+  return `<div class="card task-card" data-user="${u.user_id}">
+    <div class="task-top"><span class="avatar">${esc((u.name || '?').slice(0, 1).toUpperCase())}</span>
+      <span class="task-title">${esc(u.name || ('id' + u.user_id))}${u.username ? ` <span class="muted">@${esc(u.username)}</span>` : ''}</span>
+      <span class="muted small">${fmtDT(u.last_message_at)}</span></div>
+    <div class="task-meta">${userBadges(u)}</div>
+  </div>`;
+}
+
+async function renderDialog(userID) {
+  app.innerHTML = `<div class="loading">Загрузка…</div>`;
+  let d;
+  try { d = await api('GET', `/api/helpdesk/users/${userID}`); }
+  catch (e) { app.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`; return; }
+  const u = d.user;
+  topTitle.textContent = u.name || 'Диалог';
+  const open = d.tickets.filter(t => t.status === 'new' || t.status === 'in_progress' || t.status === 'snoozed');
+  app.innerHTML = `
+  <div class="card">
+    <div class="task-top"><span class="avatar big">${esc((u.name || '?').slice(0, 1).toUpperCase())}</span>
+      <div style="flex:1"><div class="task-title">${esc(u.name)}</div>
+      <div class="muted small">${u.username ? `<a class="plain" href="#" data-link="${esc(u.profile_url)}">@${esc(u.username)}</a> · ` : ''}ID ${u.user_id}${u.language_code ? ' · ' + esc(u.language_code) : ''}</div></div></div>
+    <div class="task-meta" style="margin-top:8px">${userBadges(u)}</div>
+    <div class="actions">
+      ${u.topic_url ? `<button class="btn" data-link="${esc(u.topic_url)}">💬 Тема в группе</button>` : ''}
+      <button class="btn" id="topicToggle">${u.topic_closed ? '🔓 Открыть тему' : '🔒 Закрыть тему'}</button>
+      <button class="btn" id="makeTicket">🎫 Создать тикет</button>
+    </div>
+  </div>
+  ${d.tickets.length ? `<div class="section-title">Тикеты (${open.length} открыто)</div>` + d.tickets.map(taskCard).join('') : ''}
+  <div class="section-title">Переписка</div>
+  <div class="card chat" id="chat">${d.messages.length ? d.messages.map(bubble).join('') : '<div class="empty">Сообщений нет</div>'}</div>
+  <div class="card detail-section">
+    <textarea class="input" id="hdReply" placeholder="Ответ пользователю — уйдёт от имени бота"></textarea>
+    <div class="actions"><button class="btn primary full" id="hdSend">📤 Отправить</button></div>
+  </div>`;
+  const chat = document.getElementById('chat');
+  chat.scrollTop = chat.scrollHeight;
+  app.querySelectorAll('[data-link]').forEach(el => el.addEventListener('click', e => { e.preventDefault(); openLink(el.dataset.link); }));
+  app.querySelectorAll('[data-open-task]').forEach(el => el.addEventListener('click', () => openView({ type: 'task', id: Number(el.dataset.openTask) })));
+  document.getElementById('topicToggle').addEventListener('click', e => withBusy(e.target, async () => {
+    await api('POST', `/api/helpdesk/users/${userID}/topic`, { closed: !u.topic_closed });
+    toast(u.topic_closed ? '🔓 Тема открыта' : '🔒 Тема закрыта');
+    renderDialog(userID);
+  }));
+  document.getElementById('makeTicket').addEventListener('click', e => withBusy(e.target, async () => {
+    toast('⏳ Оформляю тикет…');
+    const t = await api('POST', `/api/helpdesk/users/${userID}/ticket`);
+    toast('🎫 Тикет #' + t.id + ' создан');
+    openView({ type: 'task', id: t.id });
+  }));
+  document.getElementById('hdSend').addEventListener('click', e => {
+    const text = document.getElementById('hdReply').value.trim();
+    if (!text) { toast('Введите текст', true); return; }
+    withBusy(e.target, async () => {
+      await api('POST', `/api/helpdesk/users/${userID}/reply`, { text });
+      toast('📤 Отправлено');
+      renderDialog(userID);
+    });
+  });
+}
+
+function bubble(m) {
+  return `<div class="bubble ${m.outgoing ? 'out' : 'in'}"><div>${esc(m.text)}</div><span class="time">${fmtDT(m.sent_at)}</span></div>`;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -175,47 +342,52 @@ async function withBusy(btn, fn) {
 const STATUS_CHIPS_TASKS = [['act', 'Активные'], ['new', 'Новые'], ['wrk', 'В работе'], ['snz', 'Отложенные']];
 const STATUS_CHIPS_HISTORY = [['done', 'Завершённые'], ['fp', 'Ошибки'], ['all', 'Все']];
 const PRIO_CHIPS = [['all', 'Все'], ['urg', '🔥 Срочные'], ['crit', '🔴'], ['high', '🟠'], ['med', '🟡'], ['low', '🟢']];
+const SCOPE_CHIPS = [['all', 'Все'], ['helpdesk', '🎫 Тикеты'], ['personal', '👤 Личные']];
 
 async function renderTaskList(tab) {
   const filter = tab === 'tasks' ? state.tasksFilter : state.historyFilter;
   const chips = tab === 'tasks' ? STATUS_CHIPS_TASKS : STATUS_CHIPS_HISTORY;
+  const scope = isOwner() ? filter.scope : 'helpdesk';
 
   let overviewHtml = '';
   if (tab === 'tasks') {
-    try {
-      const o = await api('GET', '/api/overview');
-      overviewHtml = renderOverview(o);
-    } catch (e) { /* non-fatal */ }
+    try { overviewHtml = renderOverview(await api('GET', `/api/overview?scope=${scope}`)); } catch (e) { /* non-fatal */ }
   }
-
   app.innerHTML = overviewHtml +
+    (isOwner() ? chipRow('scope', SCOPE_CHIPS, filter.scope) : '') +
     chipRow('sfilter', chips, filter.status) +
     chipRow('pfilter', PRIO_CHIPS, filter.priority) +
     `<div id="listBody" class="loading">Загрузка…</div>`;
 
+  wireChips('scope', v => { filter.scope = v; filter.offset = 0; renderTaskList(tab); });
   wireChips('sfilter', v => { filter.status = v; filter.offset = 0; renderTaskList(tab); });
   wireChips('pfilter', v => { filter.priority = v; filter.offset = 0; renderTaskList(tab); });
+  app.querySelectorAll('[data-go-dialogs]').forEach(el => el.addEventListener('click', () => switchTab('dialogs')));
 
   try {
-    const data = await api('GET', `/api/tasks?status=${filter.status}&priority=${filter.priority}&limit=${PAGE_SIZE}&offset=${filter.offset}`);
-    renderTaskListBody(data, filter, tab);
+    const data = await api('GET', `/api/tasks?scope=${scope}&status=${filter.status}&priority=${filter.priority}&limit=${PAGE_SIZE}&offset=${filter.offset}`);
+    const body = document.getElementById('listBody');
+    body.classList.remove('loading');
+    if (!data.items || data.items.length === 0) { body.innerHTML = `<div class="empty">Здесь пусто 🎉</div>`; return; }
+    body.innerHTML = data.items.map(taskCard).join('') + pager(data, 'page');
+    body.querySelectorAll('[data-open-task]').forEach(el => el.addEventListener('click', () => openView({ type: 'task', id: Number(el.dataset.openTask) })));
+    body.querySelectorAll('[data-page]').forEach(el => el.addEventListener('click', () => { filter.offset = Number(el.dataset.page); renderTaskList(tab); }));
   } catch (e) {
     document.getElementById('listBody').innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`;
   }
 }
 
 function renderOverview(o) {
-  let conn = '';
-  if (!o.connection) {
-    conn = `<div class="conn-banner bad">🔌 Telegram Business не подключён</div>`;
-  } else if (!o.connection.enabled) {
-    conn = `<div class="conn-banner bad">⏸ Business-подключение отключено</div>`;
-  } else if (!o.connection.can_reply) {
-    conn = `<div class="conn-banner bad">⚠️ Нет права отвечать за вас</div>`;
-  } else {
-    conn = `<div class="conn-banner ok">✅ Подключено: ${esc(o.connection.name)}</div>`;
+  let banner = '';
+  if (o.awaiting > 0) {
+    banner += `<div class="conn-banner warn" data-go-dialogs>⏳ Ждут ответа: <b>${o.awaiting}</b> — открыть диалоги</div>`;
   }
-  return conn + `<div class="overview">
+  if (isOwner() && state.tasksFilter.scope !== 'helpdesk') {
+    if (!o.connection) banner += `<div class="conn-banner muted">🔌 Telegram Business не подключён</div>`;
+    else if (!o.connection.enabled) banner += `<div class="conn-banner bad">⏸ Business-подключение отключено</div>`;
+    else if (!o.connection.can_reply) banner += `<div class="conn-banner bad">⚠️ Нет права отвечать за вас</div>`;
+  }
+  return banner + `<div class="overview">
     <div class="stat"><b>${o.new}</b><span>Новые</span></div>
     <div class="stat"><b>${o.in_progress}</b><span>В работе</span></div>
     <div class="stat"><b>${o.snoozed}</b><span>Отложено</span></div>
@@ -223,56 +395,26 @@ function renderOverview(o) {
   </div>`;
 }
 
-function chipRow(name, options, active) {
-  return `<div class="chiprow" data-chips="${name}">` +
-    options.map(([v, label]) => `<button class="chip${v === active ? ' active' : ''}" data-value="${v}">${esc(label)}</button>`).join('') +
-    `</div>`;
-}
-function wireChips(name, onPick) {
-  document.querySelectorAll(`[data-chips="${name}"] .chip`).forEach(btn => {
-    btn.addEventListener('click', () => onPick(btn.dataset.value));
-  });
-}
-
-function renderTaskListBody(data, filter, tab) {
-  const body = document.getElementById('listBody');
-  if (!data.items || data.items.length === 0) {
-    body.innerHTML = `<div class="empty">Здесь пусто 🎉</div>`;
-    return;
-  }
-  body.innerHTML = data.items.map(taskCard).join('') + pager(data, filter, tab);
-  body.querySelectorAll('[data-open-task]').forEach(el => {
-    el.addEventListener('click', () => openDetail(Number(el.dataset.openTask)));
-  });
-  body.querySelectorAll('[data-page]').forEach(el => {
-    el.addEventListener('click', () => { filter.offset = Number(el.dataset.page); renderTaskList(tab); });
-  });
-}
-
 function taskCard(t) {
-  const meta = [`👤 ${esc(t.sender_name || '—')}`, CATEGORY_LABEL[t.category] || t.category];
+  const meta = [`${t.helpdesk ? '🎫' : '👤'} ${esc(t.sender_name || '—')}`, CATEGORY_LABEL[t.category] || t.category];
   if (t.status !== 'new' && t.status !== 'in_progress') meta.push(`<span class="badge status-${t.status}">${STATUS_LABEL[t.status] || t.status}</span>`);
   if (t.deadline) meta.push(`📅 ${fmtDT(t.deadline)}` + (t.overdue ? ` <span class="badge overdue">просрочено</span>` : ''));
   if (t.status === 'snoozed' && t.snooze_until) meta.push(`⏰ до ${fmtDT(t.snooze_until)}`);
   return `<div class="card task-card" data-open-task="${t.id}">
-    <div class="task-top">
-      <span class="dot ${t.priority}"></span>
-      <span class="task-title">#${t.id} ${esc(t.title || '(без заголовка)')}</span>
-    </div>
+    <div class="task-top"><span class="dot ${t.priority}"></span>
+      <span class="task-title">#${t.id} ${esc(t.title || '(без заголовка)')}</span></div>
     <div class="task-meta">${meta.join(' · ')}</div>
   </div>`;
 }
 
-function pager(data, filter, tab) {
+function pager(data, attr) {
   const hasPrev = data.offset > 0;
   const hasNext = data.offset + data.items.length < data.total;
   if (!hasPrev && !hasNext) return '';
-  const prevOffset = Math.max(0, data.offset - data.limit);
-  const nextOffset = data.offset + data.limit;
   return `<div class="actions">
-    ${hasPrev ? `<button class="btn ghost" data-page="${prevOffset}">◀️ Назад</button>` : ''}
+    ${hasPrev ? `<button class="btn ghost" data-${attr}="${Math.max(0, data.offset - data.limit)}">◀️ Назад</button>` : ''}
     <span class="btn ghost" style="pointer-events:none">${data.offset + 1}–${data.offset + data.items.length} из ${data.total}</span>
-    ${hasNext ? `<button class="btn ghost" data-page="${nextOffset}">Вперёд ▶️</button>` : ''}
+    ${hasNext ? `<button class="btn ghost" data-${attr}="${data.offset + data.limit}">Вперёд ▶️</button>` : ''}
   </div>`;
 }
 
@@ -285,46 +427,48 @@ async function renderTaskDetail(id) {
   let t;
   try { t = await api('GET', `/api/tasks/${id}`); }
   catch (e) { app.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`; return; }
+  topTitle.textContent = (t.helpdesk ? 'Тикет #' : 'Задача #') + t.id;
   app.innerHTML = taskDetailHtml(t);
-  wireTaskDetail(t);
+  app.querySelectorAll('[data-act]').forEach(btn => btn.addEventListener('click', () => handleTaskAction(t, btn.dataset.act, btn)));
+  app.querySelectorAll('[data-link]').forEach(el => el.addEventListener('click', e => { e.preventDefault(); openLink(el.dataset.link); }));
 }
 
 function taskDetailHtml(t) {
+  const hu = t.helpdesk_user;
   const senderLine = t.sender_username
-    ? `<a class="plain" href="${esc(t.profile_url)}" target="_blank" rel="noopener">${esc(t.sender_name)}</a> (@${esc(t.sender_username)})`
+    ? `<a class="plain" href="#" data-link="${esc(t.profile_url)}">${esc(t.sender_name)}</a> (@${esc(t.sender_username)})`
     : esc(t.sender_name || '—');
   return `
   <div class="card">
-    <div class="task-top">
-      <span class="dot ${t.priority}"></span>
-      <span class="task-title">${esc(t.title || '(без заголовка)')}</span>
-    </div>
+    <div class="task-top"><span class="dot ${t.priority}"></span><span class="task-title">${esc(t.title || '(без заголовка)')}</span></div>
     <div class="task-meta" style="margin-top:6px">
       <span class="badge status-${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
       <span class="badge">${PRIORITY_EMOJI[t.priority] || ''} ${PRIORITY_LABEL[t.priority] || t.priority}</span>
       <span class="badge">${CATEGORY_LABEL[t.category] || t.category}</span>
+      ${t.helpdesk ? '<span class="badge">🎫 Хелпдеск</span>' : ''}
       ${t.forwarded ? '<span class="badge">📨 Переслано</span>' : ''}
     </div>
     <div class="kv" style="margin-top:10px">
-      <div><span>От: </span>${senderLine}</div>
-      <div><span>Получено: </span>${fmtDT(t.created_at)}</div>
-      ${t.deadline ? `<div><span>Дедлайн: </span>${fmtDT(t.deadline)}${t.overdue ? ' ⚠️ просрочено' : ''}</div>` : ''}
+      <div><span>${t.helpdesk ? 'Пользователь' : 'От'}: </span>${senderLine}</div>
+      <div><span>Создано: </span>${fmtDT(t.created_at)}</div>
+      ${t.deadline ? `<div><span>Срок: </span>${fmtDT(t.deadline)}${t.overdue ? ' ⚠️ просрочено' : ''}</div>` : ''}
       ${t.status === 'snoozed' && t.snooze_until ? `<div><span>Отложено до: </span>${fmtDT(t.snooze_until)}</div>` : ''}
+      ${hu && hu.source ? `<div><span>Источник: </span>${esc(hu.source)}</div>` : ''}
     </div>
+    ${hu ? `<div class="task-meta" style="margin-top:8px">${userBadges(hu)}</div>
+    <div class="actions">
+      <button class="btn" data-act="dialog">💬 Переписка</button>
+      ${hu.topic_url ? `<button class="btn" data-link="${esc(hu.topic_url)}">↗️ Тема в группе</button>` : ''}
+    </div>` : ''}
   </div>
-
   ${t.description ? `<div class="card detail-section"><h3>Суть</h3><p>${esc(t.description)}</p></div>` : ''}
   ${t.source_text ? `<div class="card detail-section"><h3>Исходный текст</h3><div class="quote">${esc(t.source_text)}</div></div>` : ''}
-  ${t.draft_reply && !t.reply_sent_at ? `<div class="card detail-section"><h3>Черновик ответа (${STRATEGY_LABEL[t.reply_strategy] || ''})</h3><p>${esc(t.draft_reply)}</p></div>` : ''}
+  ${t.draft_reply && !t.reply_sent_at ? `<div class="card detail-section"><h3>Черновик ответа (${STRATEGY_LABEL[t.reply_strategy] || 'ответ'})</h3><p>${esc(t.draft_reply)}</p></div>` : ''}
   ${t.reply_sent_at ? `<div class="card detail-section"><h3>Ответ отправлен · ${fmtDT(t.reply_sent_at)}</h3><p>${esc(t.reply_text)}</p></div>` : ''}
-  ${t.provider ? `<div class="card detail-section" style="color:var(--hint);font-size:12px">🤖 ${esc(t.provider)} · ${esc(t.model)} · уверенность ${Math.round(t.confidence * 100)}%</div>` : ''}
-
+  ${t.provider ? `<div class="card detail-section muted small">🤖 ${esc(t.provider)} · ${esc(t.model)} · уверенность ${Math.round(t.confidence * 100)}%</div>` : ''}
   <div id="replyBox"></div>
   <div id="snoozeBox"></div>
-
-  <div class="card actions">
-    ${isOpen(t.status) ? actionButtons(t) : reopenButtons(t)}
-  </div>`;
+  <div class="card actions">${isOpen(t.status) ? actionButtons(t) : reopenButtons(t)}</div>`;
 }
 
 function isOpen(status) { return status === 'new' || status === 'in_progress' || status === 'snoozed'; }
@@ -346,64 +490,56 @@ function reopenButtons(t) {
     (t.forwarded ? '' : `<button class="btn" data-act="reply-open">✏️ Написать</button>`);
 }
 
-function wireTaskDetail(t) {
-  app.querySelectorAll('[data-act]').forEach(btn => {
-    btn.addEventListener('click', () => handleTaskAction(t, btn.dataset.act, btn));
-  });
-}
-
 async function handleTaskAction(t, action, btn) {
+  const post = (path, body, msg) => withBusy(btn, async () => { await api('POST', `/api/tasks/${t.id}/${path}`, body); toast(msg); renderTaskDetail(t.id); });
   switch (action) {
-    case 'draft':
-      await withBusy(btn, async () => { await api('POST', `/api/tasks/${t.id}/draft`); toast('🚀 Черновик отправлен'); renderTaskDetail(t.id); });
-      break;
-    case 'work':
-      await withBusy(btn, async () => { await api('POST', `/api/tasks/${t.id}/status`, { status: 'in_progress' }); toast('👀 Взято в работу'); renderTaskDetail(t.id); });
-      break;
-    case 'fp':
-      await withBusy(btn, async () => { await api('POST', `/api/tasks/${t.id}/status`, { status: 'false_positive' }); toast('🗑 Отмечено как ошибка'); renderTaskDetail(t.id); });
-      break;
-    case 'reopen':
-      await withBusy(btn, async () => { await api('POST', `/api/tasks/${t.id}/status`, { status: 'new' }); toast('♻️ Задача возвращена'); renderTaskDetail(t.id); });
-      break;
-    case 'close':
-      await handleClose(t);
-      break;
-    case 'reply-open':
-      openReplyBox(t);
-      break;
-    case 'snooze-open':
-      openSnoozeBox(t);
-      break;
+    case 'draft': return post('draft', undefined, '🚀 Черновик отправлен');
+    case 'work': return post('status', { status: 'in_progress' }, '👀 Взято в работу');
+    case 'fp': return post('status', { status: 'false_positive' }, '🗑 Отмечено как ошибка');
+    case 'reopen': return post('status', { status: 'new' }, '♻️ Возвращено в работу');
+    case 'close': return handleClose(t);
+    case 'reply-open': return openReplyBox(t);
+    case 'snooze-open': return openSnoozeBox(t);
+    case 'dialog': return openView({ type: 'user', id: t.chat_id });
   }
 }
+
+const HELPDESK_DONE_TEXT = 'Ваше обращение решено. Если остались вопросы — просто напишите нам.';
 
 async function handleClose(t) {
-  const notify = state.settings ? state.settings.notify_done_on_close : (await loadSettings()).notify_done_on_close;
-  if (!notify || t.forwarded) {
-    await api('POST', `/api/tasks/${t.id}/close`, { send_message: false });
-    toast('✅ Задача закрыта');
-    renderTaskDetail(t.id);
+  const closeWith = async body => {
+    closeModal();
+    try { await api('POST', `/api/tasks/${t.id}/close`, body); toast('✅ Закрыто'); renderTaskDetail(t.id); }
+    catch (e) { toast(e.message, true); }
+  };
+  if (t.helpdesk && !t.forwarded) {
+    showModal(`<h3>Закрыть тикет?</h3>
+      <textarea class="input" id="closeText">${esc(HELPDESK_DONE_TEXT)}</textarea>
+      <div class="actions">
+        <button class="btn primary full" id="closeYes">✅ Закрыть и отправить пользователю</button>
+        <button class="btn full" id="closeNo">Просто закрыть</button>
+        <button class="btn ghost full" id="closeCancel">Отмена</button>
+      </div>`, root => {
+      root.querySelector('#closeYes').addEventListener('click', () => closeWith({ text: root.querySelector('#closeText').value.trim() || HELPDESK_DONE_TEXT }));
+      root.querySelector('#closeNo').addEventListener('click', () => closeWith({ send_message: false }));
+      root.querySelector('#closeCancel').addEventListener('click', closeModal);
+    });
     return;
   }
-  showModal(`
-    <h3>Закрыть задачу?</h3>
-    <p style="color:var(--hint);font-size:13px;margin:0">Отправить собеседнику «Готово!» перед закрытием?</p>
+  let notify = false;
+  if (isOwner() && !t.forwarded) {
+    try { notify = (await loadSettings()).fields.find(f => f.key === 'task.notify_done_on_close').value; } catch (e) {}
+  }
+  if (!notify) return closeWith({ send_message: false });
+  showModal(`<h3>Закрыть задачу?</h3>
+    <p class="hint-text" style="margin:0">Отправить собеседнику «Готово!» перед закрытием?</p>
     <div class="actions">
       <button class="btn primary full" id="closeYes">✅ Закрыть + отправить «Готово!»</button>
       <button class="btn full" id="closeNo">Просто закрыть</button>
       <button class="btn ghost full" id="closeCancel">Отмена</button>
     </div>`, root => {
-    root.querySelector('#closeYes').addEventListener('click', async () => {
-      closeModal();
-      try { await api('POST', `/api/tasks/${t.id}/close`, { send_message: true }); toast('✅ Закрыто, отправлено «Готово!»'); renderTaskDetail(t.id); }
-      catch (e) { toast(e.message, true); }
-    });
-    root.querySelector('#closeNo').addEventListener('click', async () => {
-      closeModal();
-      try { await api('POST', `/api/tasks/${t.id}/close`, { send_message: false }); toast('✅ Задача закрыта'); renderTaskDetail(t.id); }
-      catch (e) { toast(e.message, true); }
-    });
+    root.querySelector('#closeYes').addEventListener('click', () => closeWith({ send_message: true }));
+    root.querySelector('#closeNo').addEventListener('click', () => closeWith({ send_message: false }));
     root.querySelector('#closeCancel').addEventListener('click', closeModal);
   });
 }
@@ -411,21 +547,15 @@ async function handleClose(t) {
 function openReplyBox(t) {
   const box = document.getElementById('replyBox');
   box.innerHTML = `<div class="card detail-section">
-    <h3>Ваш ответ собеседнику</h3>
+    <h3>${t.helpdesk ? 'Ответ пользователю (от имени бота)' : 'Ваш ответ собеседнику'}</h3>
     <textarea class="input" id="replyText" placeholder="Текст ответа…">${esc(t.draft_reply || '')}</textarea>
-    <div class="actions">
-      <button class="btn primary full" id="replySend">📤 Отправить</button>
-    </div>
+    <div class="actions"><button class="btn primary full" id="replySend">📤 Отправить</button></div>
   </div>`;
   box.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  document.getElementById('replySend').addEventListener('click', async (e) => {
+  document.getElementById('replySend').addEventListener('click', e => {
     const text = document.getElementById('replyText').value.trim();
     if (!text) { toast('Введите текст', true); return; }
-    await withBusy(e.target, async () => {
-      await api('POST', `/api/tasks/${t.id}/reply`, { text });
-      toast('📤 Ответ отправлен');
-      renderTaskDetail(t.id);
-    });
+    withBusy(e.target, async () => { await api('POST', `/api/tasks/${t.id}/reply`, { text }); toast('📤 Ответ отправлен'); renderTaskDetail(t.id); });
   });
 }
 
@@ -440,23 +570,15 @@ function openSnoozeBox(t) {
       <button class="chip" id="snoozeTomorrow">Завтра 09:00</button>
     </div>
     <input type="datetime-local" class="input" id="snoozeCustom" style="margin-top:8px">
-    <div class="actions">
-      <button class="btn primary full" id="snoozeCustomBtn">⏰ Отложить до указанного времени</button>
-    </div>
+    <div class="actions"><button class="btn primary full" id="snoozeCustomBtn">⏰ Отложить до указанного времени</button></div>
   </div>`;
   box.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-  const doSnooze = async (untilISO) => {
+  const doSnooze = async untilISO => {
     try { await api('POST', `/api/tasks/${t.id}/snooze`, { until: untilISO }); toast('⏰ Отложено'); renderTaskDetail(t.id); }
     catch (e) { toast(e.message, true); }
   };
-  box.querySelectorAll('[data-min]').forEach(btn => {
-    btn.addEventListener('click', () => doSnooze(new Date(Date.now() + Number(btn.dataset.min) * 60000).toISOString()));
-  });
-  document.getElementById('snoozeTomorrow').addEventListener('click', () => {
-    const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0);
-    doSnooze(d.toISOString());
-  });
+  box.querySelectorAll('[data-min]').forEach(btn => btn.addEventListener('click', () => doSnooze(new Date(Date.now() + Number(btn.dataset.min) * 60000).toISOString())));
+  document.getElementById('snoozeTomorrow').addEventListener('click', () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); doSnooze(d.toISOString()); });
   document.getElementById('snoozeCustomBtn').addEventListener('click', () => {
     const v = document.getElementById('snoozeCustom').value;
     if (!v) { toast('Укажите дату и время', true); return; }
@@ -465,7 +587,7 @@ function openSnoozeBox(t) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* Settings                                                                */
+/* Settings (owner)                                                       */
 /* ---------------------------------------------------------------------- */
 
 async function loadSettings() {
@@ -473,8 +595,12 @@ async function loadSettings() {
   return state.settings;
 }
 
+const PROVIDERS = [['claude', 'Claude'], ['gemini', 'Gemini'], ['groq', 'Groq'], ['mistral', 'Mistral'], ['openrouter', 'OpenRouter']];
+function providerLabel(p) { return (PROVIDERS.find(([id]) => id === p) || [p, p])[1]; }
+
 async function renderSettings() {
-  app.innerHTML = `<div class="loading">Загрузка…</div>`;
+  const scrollY = window.scrollY;
+  if (!state.settings) app.innerHTML = `<div class="loading">Загрузка…</div>`;
   let s;
   try { s = await loadSettings(); }
   catch (e) { app.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`; return; }
@@ -483,13 +609,203 @@ async function renderSettings() {
   renderChain();
   setChainDirty(state.chainDirty);
   wireSettings(s);
+  window.scrollTo(0, scrollY);
 }
 
-const PROVIDERS = [
-  ['claude', 'Claude'], ['gemini', 'Gemini'], ['groq', 'Groq'], ['mistral', 'Mistral'], ['openrouter', 'OpenRouter'],
-];
+function field(s, key) { return s.fields.find(f => f.key === key); }
 
-function providerLabel(p) { return PROVIDERS.find(([id]) => id === p)?.[1] || p; }
+function settingsHtml(s) {
+  const groups = s.groups.map(g => {
+    let inner;
+    if (g.id === 'ai') {
+      const general = s.fields.filter(f => f.group === 'ai' && !PROVIDERS.some(([p]) => f.key.startsWith(`ai.${p}_`)));
+      inner = aiChainHtml() + general.map(f => fieldHtml(s, f)).join('') +
+        PROVIDERS.map(([p, label]) => `<details class="sub" data-group="ai-${p}" ${state.openGroups.has('ai-' + p) ? 'open' : ''}>
+          <summary>${label}</summary>${s.fields.filter(f => f.key.startsWith(`ai.${p}_`)).map(f => fieldHtml(s, f)).join('')}</details>`).join('');
+    } else {
+      inner = s.fields.filter(f => f.group === g.id).map(f => fieldHtml(s, f)).join('');
+    }
+    if (g.id === 'helpdesk') inner += `<button class="btn full" id="hdCheck" style="margin-top:10px">🔍 Проверить группу</button><div id="hdCheckResult"></div>`;
+    if (g.id === 'backup') inner += `<div class="actions"><button class="btn primary full" id="backupRun">💾 Сделать бэкап сейчас</button></div><div id="backupList" class="loading">Загрузка…</div>`;
+    return `<details class="card group" data-group="${g.id}" ${state.openGroups.has(g.id) ? 'open' : ''}>
+      <summary class="section-title">${esc(g.title)}</summary>${inner}</details>`;
+  }).join('');
+  return groups + `<div class="card">
+    <div class="section-title" style="margin-top:0">🛠 Система</div>
+    <div class="hint-text">В .env остаются только токен бота, OWNER_ID, путь к БД, адрес веб-панели и SOCKS-прокси. Всё остальное хранится в базе.</div>
+    <div class="actions">
+      <button class="btn full" id="restartBtn">♻️ Перезапустить сервис</button>
+      <button class="btn danger full" id="resetSettings">Сбросить настройки к .env</button>
+    </div>
+  </div>`;
+}
+
+function aiChainHtml() {
+  return `<div class="hint-text">Ключи пробуются сверху вниз: если ключ не отвечает, берётся следующий.</div>
+    <div id="chainBox"></div>
+    <div class="actions"><button class="btn" id="chainAdd">＋ Добавить ключ</button><button class="btn primary" id="chainSave">💾 Сохранить</button></div>
+    <button class="btn full" id="testProvider" style="margin-top:8px">🧪 Проверить все ключи</button>
+    <div id="testResult"></div>`;
+}
+
+function restartMark(f) { return f.restart ? ' <span class="badge">после перезапуска</span>' : ''; }
+
+function fieldHtml(s, f) {
+  const label = `<div class="label">${esc(f.label)}${restartMark(f)}</div>${f.desc ? `<div class="desc">${esc(f.desc)}</div>` : ''}`;
+  const k = esc(f.key);
+  switch (f.kind) {
+    case 'bool':
+      return `<div class="setting-row"><div>${label}</div><button class="switch${f.value ? ' on' : ''}" data-field="${k}" data-kind="bool"><span class="knob"></span></button></div>`;
+    case 'int':
+      return `<div class="setting-row"><div>${label}</div><input class="input narrow" type="number" data-field="${k}" data-kind="int" value="${esc(f.value)}"${f.min ? ` min="${f.min}"` : ''}${f.max ? ` max="${f.max}"` : ''}></div>`;
+    case 'time':
+      return `<div class="setting-row"><div>${label}</div><input class="input narrow" type="time" data-field="${k}" data-kind="string" value="${esc(f.value)}"></div>`;
+    case 'select':
+      return `<div class="setting-row"><div>${label}</div><select class="input narrow" data-field="${k}" data-kind="string">${f.options.map(o => `<option value="${esc(o.value)}"${o.value === f.value ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select></div>`;
+    case 'text':
+      return `<div class="setting-block">${label}<textarea class="input" data-field="${k}" data-kind="string">${esc(f.value)}</textarea></div>`;
+    case 'list':
+      return `<div class="setting-block">${label}<textarea class="input mono" data-field="${k}" data-kind="list" placeholder="по одному на строку">${esc(f.value.join('\n'))}</textarea></div>`;
+    case 'days': {
+      const names = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
+      return `<div class="setting-block">${label}<div class="chiprow days" data-field="${k}" data-kind="days">${names.map((n, i) =>
+        `<button class="chip${f.value.includes(String(i + 1)) ? ' active' : ''}" data-day="${i + 1}">${n}</button>`).join('')}</div></div>`;
+    }
+    case 'model': {
+      const presets = (field(s, `ai.${f.provider}_presets`) || { value: [] }).value;
+      return `<div class="setting-block">${label}<input class="input mono" list="dl-${k}" data-field="${k}" data-kind="string" value="${esc(f.value)}">
+        <datalist id="dl-${k}">${presets.map(p => `<option value="${esc(p)}">`).join('')}</datalist></div>`;
+    }
+    default:
+      return `<div class="setting-block">${label}<input class="input" type="text" data-field="${k}" data-kind="string" value="${esc(f.value)}"></div>`;
+  }
+}
+
+async function patchSettings(body, okMsg) {
+  try {
+    state.settings = await api('POST', '/api/settings', body);
+    if (okMsg) toast(okMsg);
+    if (body.values && Object.keys(body.values).some(k => k.startsWith('helpdesk.'))) await refreshMe();
+  } catch (e) { toast(e.message, true); }
+  renderSettings();
+}
+
+async function refreshMe() {
+  try { state.me = await api('GET', '/api/me'); buildTabbar(); document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === state.tab)); } catch (e) {}
+}
+
+function wireSettings(s) {
+  app.querySelectorAll('details[data-group]').forEach(d => d.addEventListener('toggle', () => {
+    if (d.open) state.openGroups.add(d.dataset.group); else state.openGroups.delete(d.dataset.group);
+    if (d.open && d.dataset.group === 'backup') loadBackups();
+  }));
+  if (state.openGroups.has('backup')) loadBackups();
+
+  app.querySelectorAll('[data-field]').forEach(el => {
+    const key = el.dataset.field;
+    const f = field(s, key);
+    switch (el.dataset.kind) {
+      case 'bool':
+        el.addEventListener('click', () => patchSettings({ values: { [key]: !f.value } }));
+        break;
+      case 'int':
+        el.addEventListener('change', () => patchSettings({ values: { [key]: Number(el.value) } }, '✓ ' + f.label));
+        break;
+      case 'list':
+        el.addEventListener('change', () => patchSettings({ values: { [key]: el.value.split('\n').map(x => x.trim()).filter(Boolean) } }, '✓ ' + f.label));
+        break;
+      case 'days':
+        el.querySelectorAll('[data-day]').forEach(chip => chip.addEventListener('click', () => {
+          const day = chip.dataset.day;
+          const next = f.value.includes(day) ? f.value.replace(day, '') : f.value + day;
+          patchSettings({ values: { [key]: next } });
+        }));
+        break;
+      default:
+        el.addEventListener('change', () => patchSettings({ values: { [key]: el.value } }, '✓ ' + f.label));
+    }
+  });
+
+  document.getElementById('chainAdd').addEventListener('click', () => {
+    const d = state.chainDraft;
+    d.push(newChainRow(d.length ? d[d.length - 1].provider : ''));
+    setChainDirty(true);
+    renderChain();
+    const inputs = app.querySelectorAll('.chain-key');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  });
+  document.getElementById('chainSave').addEventListener('click', e => {
+    const d = state.chainDraft;
+    const bad = d.findIndex(r => !r.key.trim() && !r.key_id);
+    if (bad >= 0) { toast(`Строка ${bad + 1}: введите API-ключ`, true); return; }
+    const ai_chain = d.map(r => r.key.trim() ? { provider: r.provider, key: r.key.trim() } : { provider: r.provider, key_id: r.key_id });
+    withBusy(e.target, async () => {
+      state.settings = await api('POST', '/api/settings', { ai_chain });
+      state.chainDraft = null;
+      state.chainDirty = false;
+      toast('💾 Ключи AI сохранены');
+      renderSettings();
+    });
+  });
+  document.getElementById('testProvider').addEventListener('click', e => {
+    if (state.chainDirty) { toast('Сначала сохраните ключи — проверяются сохранённые', true); return; }
+    const out = document.getElementById('testResult');
+    out.innerHTML = `<div class="loading">Проверяю…</div>`;
+    withBusy(e.target, async () => {
+      try { out.innerHTML = testResultHtml(await api('POST', '/api/provider/test')); }
+      catch (err) { out.innerHTML = `<div class="empty">❌ ${esc(err.message)}</div>`; }
+    });
+  });
+
+  document.getElementById('hdCheck').addEventListener('click', e => withBusy(e.target, async () => {
+    const out = document.getElementById('hdCheckResult');
+    try {
+      const r = await api('POST', '/api/helpdesk/check');
+      const line = (ok, text) => `<p class="probe ${ok ? 'ok' : 'bad'}">${ok ? '✅' : '❌'} ${text}</p>`;
+      out.innerHTML = `<div class="card detail-section inset">
+        ${line(true, 'Группа: ' + esc(r.title || '—'))}
+        ${line(r.is_forum, 'Темы (форум) включены')}
+        ${line(r.bot_admin, 'Бот — администратор')}
+        ${line(r.can_manage_topics, 'Право «Управление темами»')}
+        ${line(r.can_pin_messages, 'Право закреплять сообщения (карточки тикетов)')}
+        ${line(r.can_delete_messages, 'Право удалять сообщения (скрывать команду /1)')}
+      </div>`;
+    } catch (err) { out.innerHTML = `<div class="empty">❌ ${esc(err.message)}</div>`; }
+  }));
+
+  document.getElementById('backupRun').addEventListener('click', e => withBusy(e.target, async () => {
+    const r = await api('POST', '/api/backups');
+    if (r.warning) toast(r.warning, true); else toast('💾 Бэкап создан: ' + fmtSize(r.backup.size));
+    loadBackups();
+  }));
+
+  document.getElementById('restartBtn').addEventListener('click', async () => {
+    if (!await confirmModal('Перезапустить сервис?', 'Бот будет недоступен несколько секунд.', 'Перезапустить')) return;
+    try {
+      await api('POST', '/api/system/restart');
+      toast('♻️ Перезапуск… обновите через 10 секунд');
+    } catch (e) { toast(e.message, true); }
+  });
+
+  document.getElementById('resetSettings').addEventListener('click', async () => {
+    if (!await confirmModal('Сбросить настройки?', 'Все настройки, включая хелпдеск и ключи AI, вернутся к значениям из .env, а если их там нет — к значениям по умолчанию.', 'Да, сбросить', true)) return;
+    try { await api('POST', '/api/settings/reset'); toast('♻️ Настройки сброшены'); renderSettings(); }
+    catch (e) { toast(e.message, true); }
+  });
+}
+
+async function loadBackups() {
+  const box = document.getElementById('backupList');
+  if (!box) return;
+  try {
+    const r = await api('GET', '/api/backups');
+    box.classList.remove('loading');
+    box.innerHTML = r.items.length
+      ? `<div class="hint-text" style="margin-top:8px">${esc(r.dir)}</div>` + r.items.map(b =>
+        `<div class="setting-row"><div class="mono small">${esc(b.name)}</div><div class="muted small">${fmtSize(b.size)}</div></div>`).join('')
+      : `<div class="empty" style="padding:14px 0">Бэкапов пока нет</div>`;
+  } catch (e) { box.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`; }
+}
 
 /* AI chain editor: rows are edited locally (state.chainDraft) and sent together on "Сохранить".
    Stored keys never reach the browser — a row keeps the server's key_id until a new key is typed. */
@@ -500,26 +816,24 @@ function chainFromSettings(s) {
 
 function newChainRow(provider) { return { provider: provider || 'gemini', key: '', key_id: '', key_masked: '' }; }
 
-function chainRowsHtml(draft) {
-  if (!draft.length) return `<div class="empty" style="padding:14px 0">Ключей нет — AI не работает. Добавьте хотя бы один.</div>`;
-  return draft.map((e, i) => `<div class="chain-row" data-i="${i}">
-    <div class="chain-line">
-      <span class="chain-num">${i + 1}</span>
-      <select class="input chain-provider">${PROVIDERS.map(([p, l]) => `<option value="${p}"${p === e.provider ? ' selected' : ''}>${l}</option>`).join('')}</select>
-      <button class="icon-btn" data-chain="up" aria-label="Выше"${i === 0 ? ' disabled' : ''}>▲</button>
-      <button class="icon-btn" data-chain="down" aria-label="Ниже"${i === draft.length - 1 ? ' disabled' : ''}>▼</button>
-      <button class="icon-btn" data-chain="add" aria-label="Добавить строку ниже">＋</button>
-      <button class="icon-btn danger" data-chain="del" aria-label="Удалить строку">−</button>
-    </div>
-    <input class="input chain-key" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
-      placeholder="${e.key_id ? 'сохранён ' + esc(e.key_masked) + ' · новый заменит' : 'API-ключ'}" value="${esc(e.key)}">
-  </div>`).join('');
-}
-
 function renderChain() {
   const box = document.getElementById('chainBox');
   if (!box) return;
-  box.innerHTML = chainRowsHtml(state.chainDraft);
+  const draft = state.chainDraft;
+  box.innerHTML = !draft.length
+    ? `<div class="empty" style="padding:14px 0">Ключей нет — AI не работает. Добавьте хотя бы один.</div>`
+    : draft.map((e, i) => `<div class="chain-row" data-i="${i}">
+      <div class="chain-line">
+        <span class="chain-num">${i + 1}</span>
+        <select class="input chain-provider">${PROVIDERS.map(([p, l]) => `<option value="${p}"${p === e.provider ? ' selected' : ''}>${l}</option>`).join('')}</select>
+        <button class="icon-btn" data-chain="up"${i === 0 ? ' disabled' : ''}>▲</button>
+        <button class="icon-btn" data-chain="down"${i === draft.length - 1 ? ' disabled' : ''}>▼</button>
+        <button class="icon-btn" data-chain="add">＋</button>
+        <button class="icon-btn danger" data-chain="del">−</button>
+      </div>
+      <input class="input chain-key" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+        placeholder="${e.key_id ? 'сохранён ' + esc(e.key_masked) + ' · новый заменит' : 'API-ключ'}" value="${esc(e.key)}">
+    </div>`).join('');
   box.querySelectorAll('.chain-row').forEach(rowEl => {
     const i = Number(rowEl.dataset.i);
     rowEl.querySelector('.chain-provider').addEventListener('change', ev => { state.chainDraft[i].provider = ev.target.value; setChainDirty(true); });
@@ -546,163 +860,33 @@ function setChainDirty(dirty) {
   if (btn) { btn.disabled = !dirty; btn.textContent = dirty ? '💾 Сохранить' : '✓ Сохранено'; }
 }
 
-function settingsHtml(s) {
-  const debChip = (v) => `<button class="chip${v === s.debounce_seconds ? ' active' : ''}" data-deb="${v}">${v}с</button>`;
-  const sensBtn = (v, label) => `<button class="${v === s.sensitivity ? 'active' : ''}" data-sens="${v}">${label}</button>`;
-  const modelRow = (p) => `<div class="setting-row">
-      <div><div class="label">Модель ${providerLabel(p)}</div></div>
-      <select class="input" id="model_${p}" data-model-provider="${p}" style="width:auto;max-width:60%">${modelOptions(s[p + '_presets'], s[p + '_model'])}</select>
-    </div>`;
-  const chainProviders = [...new Set(s.ai_chain.map(e => e.provider))];
-
-  return `
-  <div class="card">
-    <div class="section-title" style="margin-top:0">AI-провайдеры</div>
-    <div class="hint-text">Ключи пробуются сверху вниз: если ключ не отвечает, сервер сразу берёт следующий.</div>
-    <div id="chainBox"></div>
-    <div class="actions">
-      <button class="btn" id="chainAdd">＋ Добавить ключ</button>
-      <button class="btn primary" id="chainSave">💾 Сохранить</button>
-    </div>
-    ${chainProviders.map(modelRow).join('')}
-    <button class="btn full" id="testProvider" style="margin-top:8px">🧪 Проверить все ключи</button>
-    <div id="testResult"></div>
-  </div>
-
-  <div class="card">
-    <div class="section-title" style="margin-top:0">Триаж</div>
-    <div class="setting-row"><div class="label">Дебаунс (склейка сообщений)</div></div>
-    <div class="chiprow">${[10, 20, 30, 60].map(debChip).join('')}</div>
-    <div class="setting-row">
-      <div><div class="label">Чувствительность</div></div>
-    </div>
-    <div class="segmented">${sensBtn('low', 'Низкая')}${sensBtn('medium', 'Средняя')}${sensBtn('high', 'Высокая')}</div>
-    ${toggleRow('paused', '⏸ Пауза триажа', 'Сообщения сохраняются, но не анализируются', s.triage_paused)}
-  </div>
-
-  <div class="card">
-    <div class="section-title" style="margin-top:0">Поведение</div>
-    ${toggleRow('markread', '👁 Отмечать прочитанным', 'При переводе задачи «В работу»', s.mark_read_on_work)}
-    ${toggleRow('notifydone', '💬 Спрашивать про «Готово!»', 'При закрытии задачи предлагать отправить сообщение', s.notify_done_on_close)}
-    ${toggleRow('digest', '🌅 Утренний дайджест', 'Список висящих и просроченных задач', s.digest_enabled)}
-    <div class="setting-row">
-      <div class="label">Время дайджеста</div>
-      <input type="time" class="input" id="digestTime" value="${esc(s.digest_time)}" style="width:auto">
-    </div>
-  </div>
-
-  <div class="card">
-    <button class="btn danger full" id="resetSettings">♻️ Сбросить к .env</button>
-  </div>`;
-}
-
-function modelOptions(presets, current) {
-  const all = presets.includes(current) ? presets : [current, ...presets];
-  return all.map(m => `<option value="${esc(m)}" ${m === current ? 'selected' : ''}>${esc(m)}</option>`).join('');
-}
-
-function toggleRow(id, label, desc, on) {
-  return `<div class="setting-row">
-    <div><div class="label">${label}</div><div class="desc">${desc}</div></div>
-    <button class="switch${on ? ' on' : ''}" data-toggle="${id}"><span class="knob"></span></button>
-  </div>`;
-}
-
-function wireSettings(s) {
-  const patch = async (body, okMsg) => {
-    try {
-      state.settings = await api('POST', '/api/settings', body);
-      if (okMsg) toast(okMsg);
-      renderSettings();
-    } catch (e) { toast(e.message, true); }
-  };
-
-  document.getElementById('chainAdd').addEventListener('click', () => {
-    const d = state.chainDraft;
-    d.push(newChainRow(d.length ? d[d.length - 1].provider : ''));
-    setChainDirty(true);
-    renderChain();
-    const inputs = app.querySelectorAll('.chain-key');
-    if (inputs.length) inputs[inputs.length - 1].focus();
-  });
-  document.getElementById('chainSave').addEventListener('click', async (e) => {
-    const d = state.chainDraft;
-    const bad = d.findIndex(r => !r.key.trim() && !r.key_id);
-    if (bad >= 0) { toast(`Строка ${bad + 1}: введите API-ключ`, true); return; }
-    const ai_chain = d.map(r => r.key.trim() ? { provider: r.provider, key: r.key.trim() } : { provider: r.provider, key_id: r.key_id });
-    await withBusy(e.target, async () => {
-      state.settings = await api('POST', '/api/settings', { ai_chain });
-      state.chainDraft = null;
-      state.chainDirty = false;
-      toast('💾 Ключи AI сохранены');
-      renderSettings();
-    });
-  });
-  app.querySelectorAll('[data-deb]').forEach(btn => btn.addEventListener('click', () => patch({ debounce_seconds: Number(btn.dataset.deb) })));
-  app.querySelectorAll('[data-sens]').forEach(btn => btn.addEventListener('click', () => patch({ sensitivity: btn.dataset.sens })));
-  app.querySelectorAll('[data-toggle]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const map = { paused: 'triage_paused', markread: 'mark_read_on_work', notifydone: 'notify_done_on_close', digest: 'digest_enabled' };
-      const key = map[btn.dataset.toggle];
-      const current = btn.classList.contains('on');
-      patch({ [key]: !current });
-    });
-  });
-
-  app.querySelectorAll('[data-model-provider]').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const p = sel.dataset.modelProvider;
-      const label = PROVIDERS.find(([id]) => id === p)?.[1] || p;
-      patch({ [p + '_model']: sel.value }, `🧠 Модель ${label} обновлена`);
-    });
-  });
-
-  const digestTime = document.getElementById('digestTime');
-  digestTime.addEventListener('change', () => patch({ digest_time: digestTime.value }, '🕘 Время дайджеста обновлено'));
-
-  document.getElementById('testProvider').addEventListener('click', async (e) => {
-    if (state.chainDirty) { toast('Сначала сохраните ключи — проверяются сохранённые', true); return; }
-    const resultEl = document.getElementById('testResult');
-    resultEl.innerHTML = `<div class="loading">Проверяю…</div>`;
-    await withBusy(e.target, async () => {
-      try {
-        const r = await api('POST', '/api/provider/test');
-        resultEl.innerHTML = testResultHtml(r);
-      } catch (err) {
-        resultEl.innerHTML = `<div class="empty">❌ ${esc(err.message)}</div>`;
-      }
-    });
-  });
-
-  document.getElementById('resetSettings').addEventListener('click', () => {
-    showModal(`
-      <h3>Сбросить настройки?</h3>
-      <p style="color:var(--hint);font-size:13px;margin:0">Все изменения, сделанные в боте и веб-панели, вернутся к значениям из .env на сервере.</p>
-      <div class="actions">
-        <button class="btn danger full" id="resetYes">Да, сбросить</button>
-        <button class="btn ghost full" id="resetNo">Отмена</button>
-      </div>`, root => {
-      root.querySelector('#resetYes').addEventListener('click', async () => {
-        closeModal();
-        try { await api('POST', '/api/settings/reset'); toast('♻️ Настройки сброшены'); renderSettings(); }
-        catch (e) { toast(e.message, true); }
-      });
-      root.querySelector('#resetNo').addEventListener('click', closeModal);
-    });
-  });
-}
-
 function testResultHtml(r) {
-  return `<div class="card detail-section" style="margin-top:10px">` + r.results.map(x => {
+  return `<div class="card detail-section inset">` + r.results.map(x => {
     const head = `${x.index}. ${esc(providerLabel(x.provider))} · ${esc(x.key_masked)} · ${esc(x.model)} · ${(x.latency_ms / 1000).toFixed(1)} с`;
     if (x.error) return `<p class="probe bad"><b>❌ ${head}</b><br>${esc(x.error)}</p>`;
-    const a = x.analysis;
-    return `<p class="probe ok"><b>✅ ${head}</b><br>работает · задача: ${a.is_task ? 'да' : 'нет'} · уверенность ${Math.round(a.confidence * 100)}%</p>`;
+    return `<p class="probe ok"><b>✅ ${head}</b><br>работает · задача: ${x.analysis.is_task ? 'да' : 'нет'} · уверенность ${Math.round(x.analysis.confidence * 100)}%</p>`;
   }).join('') + `</div>`;
 }
 
 /* ---------------------------------------------------------------------- */
-/* Boot — after every screen-render function above is defined             */
+/* Boot                                                                   */
 /* ---------------------------------------------------------------------- */
 
-switchTab('tasks');
+(async function boot() {
+  try {
+    state.me = await api('GET', '/api/me');
+  } catch (e) {
+    topTitle.textContent = 'Нет доступа';
+    app.innerHTML = `<div class="card empty">⛔ ${esc(e.message)}</div>`;
+    return;
+  }
+  buildTabbar();
+  const params = new URLSearchParams(location.search);
+  const startParam = tg && tg.initDataUnsafe ? tg.initDataUnsafe.start_param : '';
+  const taskID = Number(params.get('task') || (startParam && startParam.startsWith('t') ? startParam.slice(1) : 0));
+  const first = tabsForMe()[0][0];
+  state.tab = taskID ? 'tasks' : first;
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === state.tab));
+  if (taskID) openView({ type: 'task', id: taskID });
+  else render();
+})();

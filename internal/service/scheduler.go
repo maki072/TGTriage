@@ -14,23 +14,24 @@ type SchedulerNotifier interface {
 	Digest(ctx context.Context, d *Digest)
 }
 
-// Scheduler runs periodic jobs: snooze reminders, morning digest, history retention.
+// Scheduler runs periodic jobs: snooze reminders, morning digest, history retention, helpdesk
+// reminders about unanswered users and database backups.
 type Scheduler struct {
-	tasks     *TaskService
-	settings  *SettingsService
-	messages  domain.MessageRepository
-	notifier  SchedulerNotifier
-	loc       *time.Location
-	retention time.Duration
-	interval  time.Duration
-	log       *slog.Logger
+	tasks    *TaskService
+	settings *SettingsService
+	messages domain.MessageRepository
+	notifier SchedulerNotifier
+	helpdesk *HelpdeskService // optional
+	backups  *BackupService   // optional
+	interval time.Duration
+	log      *slog.Logger
 }
 
 func NewScheduler(tasks *TaskService, settings *SettingsService, messages domain.MessageRepository,
-	notifier SchedulerNotifier, loc *time.Location, retention time.Duration, log *slog.Logger) *Scheduler {
+	notifier SchedulerNotifier, helpdesk *HelpdeskService, backups *BackupService, log *slog.Logger) *Scheduler {
 	return &Scheduler{
-		tasks: tasks, settings: settings, messages: messages, notifier: notifier, loc: loc,
-		retention: retention, interval: 30 * time.Second, log: log.With("component", "scheduler"),
+		tasks: tasks, settings: settings, messages: messages, notifier: notifier, helpdesk: helpdesk, backups: backups,
+		interval: 30 * time.Second, log: log.With("component", "scheduler"),
 	}
 }
 
@@ -58,6 +59,12 @@ func (s *Scheduler) tick(ctx context.Context) {
 	s.wakeSnoozed(ctx)
 	s.digest(ctx)
 	s.cleanup(ctx)
+	if s.helpdesk != nil {
+		s.helpdesk.CheckReminders(ctx)
+	}
+	if s.backups != nil {
+		s.backups.RunIfDue(ctx)
+	}
 }
 
 func (s *Scheduler) wakeSnoozed(ctx context.Context) {
@@ -81,8 +88,9 @@ func (s *Scheduler) digest(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	now := time.Now().In(s.loc)
-	target := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, s.loc)
+	loc := s.settings.Location()
+	now := time.Now().In(loc)
+	target := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, loc)
 	if now.Before(target) || now.Sub(target) > 3*time.Hour {
 		return
 	}
@@ -96,7 +104,7 @@ func (s *Scheduler) digest(ctx context.Context) {
 		s.log.Error("save digest mark", "err", err)
 		return
 	}
-	d, err := s.tasks.BuildDigest(ctx)
+	d, err := s.tasks.BuildDigest(ctx, domain.ScopeAll)
 	if err != nil {
 		s.log.Error("build digest", "err", err)
 		return
@@ -105,17 +113,24 @@ func (s *Scheduler) digest(ctx context.Context) {
 }
 
 func (s *Scheduler) cleanup(ctx context.Context) {
-	if s.retention <= 0 {
+	days := s.settings.Get().RetentionDays
+	if days <= 0 {
 		return
 	}
-	today := time.Now().In(s.loc).Format(time.DateOnly)
+	today := time.Now().In(s.settings.Location()).Format(time.DateOnly)
 	if last, err := s.settings.Meta(ctx, "last_cleanup"); err != nil || last == today {
 		return
 	}
-	n, err := s.messages.DeleteOlderThan(ctx, time.Now().Add(-s.retention))
+	before := time.Now().AddDate(0, 0, -days)
+	n, err := s.messages.DeleteOlderThan(ctx, before)
 	if err != nil {
 		s.log.Error("cleanup messages", "err", err)
 		return
+	}
+	if s.helpdesk != nil {
+		if _, err := s.helpdesk.CleanupMessages(ctx, before); err != nil {
+			s.log.Error("cleanup helpdesk mappings", "err", err)
+		}
 	}
 	_ = s.settings.SetMeta(ctx, "last_cleanup", today)
 	if n > 0 {

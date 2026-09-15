@@ -1,8 +1,9 @@
 // Package telegram is a minimal, dependency-free Telegram Bot API client
-// with Telegram Business support (business connections and messages).
+// with Telegram Business support (business connections and messages) and forum topics.
 package telegram
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -13,6 +14,7 @@ type Update struct {
 	Message                 *Message                 `json:"message,omitempty"`
 	EditedMessage           *Message                 `json:"edited_message,omitempty"`
 	CallbackQuery           *CallbackQuery           `json:"callback_query,omitempty"`
+	MyChatMember            *ChatMemberUpdated       `json:"my_chat_member,omitempty"`
 	BusinessConnection      *BusinessConnection      `json:"business_connection,omitempty"`
 	BusinessMessage         *Message                 `json:"business_message,omitempty"`
 	EditedBusinessMessage   *Message                 `json:"edited_business_message,omitempty"`
@@ -21,8 +23,59 @@ type Update struct {
 
 // AllowedUpdates is the list of update types the service subscribes to.
 var AllowedUpdates = []string{
-	"message", "callback_query",
+	"message", "edited_message", "callback_query", "my_chat_member",
 	"business_connection", "business_message", "edited_business_message", "deleted_business_messages",
+}
+
+// ChatMember is a member of a chat with the rights relevant to the service.
+type ChatMember struct {
+	Status            string `json:"status"` // creator | administrator | member | restricted | left | kicked
+	User              User   `json:"user"`
+	IsMember          bool   `json:"is_member,omitempty"` // restricted only
+	CanManageTopics   bool   `json:"can_manage_topics,omitempty"`
+	CanDeleteMessages bool   `json:"can_delete_messages,omitempty"`
+	CanPinMessages    bool   `json:"can_pin_messages,omitempty"`
+}
+
+// InChat reports whether the member is currently in the chat.
+func (m *ChatMember) InChat() bool {
+	switch m.Status {
+	case "creator", "administrator", "member":
+		return true
+	case "restricted":
+		return m.IsMember
+	}
+	return false
+}
+
+// ChatMemberUpdated reports a change of the bot's own membership (my_chat_member).
+type ChatMemberUpdated struct {
+	Chat          Chat       `json:"chat"`
+	From          User       `json:"from"`
+	Date          int64      `json:"date"`
+	OldChatMember ChatMember `json:"old_chat_member"`
+	NewChatMember ChatMember `json:"new_chat_member"`
+}
+
+// ForumTopic is a created forum topic.
+type ForumTopic struct {
+	MessageThreadID int    `json:"message_thread_id"`
+	Name            string `json:"name"`
+}
+
+// ReplyParameters describes the message to reply to.
+type ReplyParameters struct {
+	MessageID                int  `json:"message_id"`
+	AllowSendingWithoutReply bool `json:"allow_sending_without_reply,omitempty"`
+}
+
+// CopyMessageParams are parameters of copyMessage.
+type CopyMessageParams struct {
+	ChatID          int64            `json:"chat_id"`
+	MessageThreadID int              `json:"message_thread_id,omitempty"`
+	FromChatID      int64            `json:"from_chat_id"`
+	MessageID       int              `json:"message_id"`
+	ReplyParameters *ReplyParameters `json:"reply_parameters,omitempty"`
 }
 
 type User struct {
@@ -56,6 +109,7 @@ type Chat struct {
 	Username  string `json:"username,omitempty"`
 	FirstName string `json:"first_name,omitempty"`
 	LastName  string `json:"last_name,omitempty"`
+	IsForum   bool   `json:"is_forum,omitempty"`
 }
 
 type Media struct {
@@ -127,27 +181,37 @@ func (o *MessageOrigin) AuthorName() string {
 }
 
 type Message struct {
-	MessageID            int            `json:"message_id"`
-	From                 *User          `json:"from,omitempty"`
-	SenderBusinessBot    *User          `json:"sender_business_bot,omitempty"`
-	Chat                 Chat           `json:"chat"`
-	Date                 int64          `json:"date"`
-	BusinessConnectionID string         `json:"business_connection_id,omitempty"`
-	ReplyToMessage       *Message       `json:"reply_to_message,omitempty"`
-	ForwardOrigin        *MessageOrigin `json:"forward_origin,omitempty"`
-	Text                 string         `json:"text,omitempty"`
-	Caption              string         `json:"caption,omitempty"`
-	Photo                []Media        `json:"photo,omitempty"`
-	Video                *Media         `json:"video,omitempty"`
-	VideoNote            *Media         `json:"video_note,omitempty"`
-	Voice                *Media         `json:"voice,omitempty"`
-	Audio                *Media         `json:"audio,omitempty"`
-	Animation            *Media         `json:"animation,omitempty"`
-	Document             *Media         `json:"document,omitempty"`
-	Sticker              *Sticker       `json:"sticker,omitempty"`
-	Location             *Location      `json:"location,omitempty"`
-	Contact              *Contact       `json:"contact,omitempty"`
-	Poll                 *Poll          `json:"poll,omitempty"`
+	MessageID            int             `json:"message_id"`
+	MessageThreadID      int             `json:"message_thread_id,omitempty"`
+	IsTopicMessage       bool            `json:"is_topic_message,omitempty"`
+	From                 *User           `json:"from,omitempty"`
+	SenderChat           *Chat           `json:"sender_chat,omitempty"`
+	SenderBusinessBot    *User           `json:"sender_business_bot,omitempty"`
+	Chat                 Chat            `json:"chat"`
+	Date                 int64           `json:"date"`
+	BusinessConnectionID string          `json:"business_connection_id,omitempty"`
+	ReplyToMessage       *Message        `json:"reply_to_message,omitempty"`
+	ForwardOrigin        *MessageOrigin  `json:"forward_origin,omitempty"`
+	MediaGroupID         string          `json:"media_group_id,omitempty"`
+	Text                 string          `json:"text,omitempty"`
+	Entities             json.RawMessage `json:"entities,omitempty"`
+	Caption              string          `json:"caption,omitempty"`
+	CaptionEntities      json.RawMessage `json:"caption_entities,omitempty"`
+	ForumTopicCreated    *struct{}       `json:"forum_topic_created,omitempty"`
+	ForumTopicClosed     *struct{}       `json:"forum_topic_closed,omitempty"`
+	ForumTopicReopened   *struct{}       `json:"forum_topic_reopened,omitempty"`
+	ForumTopicEdited     *struct{}       `json:"forum_topic_edited,omitempty"`
+	Photo                []Media         `json:"photo,omitempty"`
+	Video                *Media          `json:"video,omitempty"`
+	VideoNote            *Media          `json:"video_note,omitempty"`
+	Voice                *Media          `json:"voice,omitempty"`
+	Audio                *Media          `json:"audio,omitempty"`
+	Animation            *Media          `json:"animation,omitempty"`
+	Document             *Media          `json:"document,omitempty"`
+	Sticker              *Sticker        `json:"sticker,omitempty"`
+	Location             *Location       `json:"location,omitempty"`
+	Contact              *Contact        `json:"contact,omitempty"`
+	Poll                 *Poll           `json:"poll,omitempty"`
 }
 
 // Content returns a textual representation of the message suitable for LLM analysis.
@@ -266,10 +330,13 @@ type LinkPreviewOptions struct {
 type SendMessageParams struct {
 	BusinessConnectionID string                `json:"business_connection_id,omitempty"`
 	ChatID               int64                 `json:"chat_id"`
+	MessageThreadID      int                   `json:"message_thread_id,omitempty"`
 	Text                 string                `json:"text"`
 	ParseMode            string                `json:"parse_mode,omitempty"`
 	ReplyMarkup          *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 	LinkPreviewOptions   *LinkPreviewOptions   `json:"link_preview_options,omitempty"`
+	ReplyParameters      *ReplyParameters      `json:"reply_parameters,omitempty"`
+	DisableNotification  bool                  `json:"disable_notification,omitempty"`
 }
 
 type EditMessageTextParams struct {
@@ -277,8 +344,16 @@ type EditMessageTextParams struct {
 	MessageID          int                   `json:"message_id"`
 	Text               string                `json:"text"`
 	ParseMode          string                `json:"parse_mode,omitempty"`
+	Entities           json.RawMessage       `json:"entities,omitempty"`
 	ReplyMarkup        *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 	LinkPreviewOptions *LinkPreviewOptions   `json:"link_preview_options,omitempty"`
+}
+
+type EditMessageCaptionParams struct {
+	ChatID          int64           `json:"chat_id"`
+	MessageID       int             `json:"message_id"`
+	Caption         string          `json:"caption"`
+	CaptionEntities json.RawMessage `json:"caption_entities,omitempty"`
 }
 
 type BotCommand struct {

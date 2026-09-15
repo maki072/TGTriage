@@ -184,8 +184,9 @@ func (b *Bot) renderTask(ctx context.Context, ref *msgRef, t *domain.Task, heade
 	if markup == nil {
 		markup = b.taskKeyboard(t)
 	}
-	err := b.render(ctx, ref, b.taskCardText(t, header, b.cfg.DeepLinks), markup)
-	if err != nil && b.cfg.DeepLinks && telegram.IsEntityError(err) {
+	links := b.settings.Get().DeepLinks
+	err := b.render(ctx, ref, b.taskCardText(t, header, links), markup)
+	if err != nil && links && telegram.IsEntityError(err) {
 		b.log.Warn("task card rejected with links, retrying without them", "err", err)
 		err = b.render(ctx, ref, b.taskCardText(t, header, false), markup)
 	}
@@ -212,12 +213,20 @@ func (b *Bot) taskCardText(t *domain.Task, header string, links bool) string {
 	if t.SenderUsername != "" {
 		sender += " (@" + esc(t.SenderUsername) + ")"
 	}
-	if t.HasChat() {
+	switch {
+	case t.IsHelpdesk():
+		fmt.Fprintf(&sb, "🎧 Хелпдеск, пользователь: %s\n", esc(trunc(t.SenderName, 60)))
+		if u := b.ticketUser(context.Background(), t); u != nil {
+			if link := b.helpdesk.TopicURL(u); link != "" {
+				fmt.Fprintf(&sb, "💬 <a href=\"%s\">Тема пользователя</a>\n", esc(link))
+			}
+		}
+	case t.HasChat():
 		fmt.Fprintf(&sb, "👤 От: %s\n", sender)
-	} else {
+	default:
 		fmt.Fprintf(&sb, "📨 Переслано, автор: %s\n", sender)
 	}
-	if links && t.FirstSourceMessageID() > 0 {
+	if links && t.FirstSourceMessageID() > 0 && !t.IsHelpdesk() {
 		fmt.Fprintf(&sb, "💬 <a href=\"%s\">Открыть исходное сообщение</a>\n", esc(messageURL(t.ChatID, t.FirstSourceMessageID())))
 	}
 	fmt.Fprintf(&sb, "🏷 %s · ⚡ приоритет %s\n", categoryLabel(t.Category), priorityName(t.Priority))
@@ -304,11 +313,12 @@ func closeConfirmKeyboard(id int64) *telegram.InlineKeyboardMarkup {
 // ---------- main menu ----------
 
 func (b *Bot) showMainMenu(ctx context.Context, ref *msgRef) error {
-	o, err := b.tasks.Overview(ctx)
+	o, err := b.tasks.Overview(ctx, domain.ScopeAll)
 	if err != nil {
 		return b.render(ctx, ref, "❌ "+esc(humanError(err)), kb(row(cb("🔄 Повторить", "m"))))
 	}
 	st := b.settings.Get()
+	webAppURL := st.WebAppPublicURL
 	var sb strings.Builder
 	sb.WriteString("🤖 <b>Персональный ассистент</b>\n\n")
 	switch c := o.Connection; {
@@ -333,7 +343,15 @@ func (b *Bot) showMainMenu(ctx context.Context, ref *msgRef) error {
 	} else {
 		sb.WriteString("▶️ Триаж: активен")
 	}
-	fmt.Fprintf(&sb, " · дебаунс %d с · чувствительность %s\n\n", st.DebounceSeconds, sensitivityName(st.Sensitivity))
+	fmt.Fprintf(&sb, " · дебаунс %d с · чувствительность %s\n", st.DebounceSeconds, sensitivityName(st.Sensitivity))
+	switch {
+	case st.Helpdesk.Active():
+		sb.WriteString("🎧 Хелпдеск: ✅ включён\n\n")
+	case st.Helpdesk.Enabled:
+		sb.WriteString("🎧 Хелпдеск: ⚠️ не указана группа\n\n")
+	default:
+		sb.WriteString("🎧 Хелпдеск: выключен\n\n")
+	}
 	fmt.Fprintf(&sb, "🆕 Новые: <b>%d</b> · 👀 В работе: <b>%d</b>\n⏰ Отложено: <b>%d</b> · ⚠️ Просрочено: <b>%d</b>",
 		o.New, o.InProgress, o.Snoozed, o.Overdue)
 
@@ -343,8 +361,8 @@ func (b *Bot) showMainMenu(ctx context.Context, ref *msgRef) error {
 		row(cb("✅ Завершённые", "tl:done:all:0"), cb("🗑 Ошибки", "tl:fp:all:0")),
 		row(cb("🌅 Дайджест", "dg"), cb("📊 Статистика", "sx")),
 	}
-	if b.cfg.WebAppURL != "" {
-		rows = append(rows, row(webAppButton("📱 Открыть веб-панель", b.cfg.WebAppURL)))
+	if webAppURL != "" {
+		rows = append(rows, row(webAppButton("📱 Открыть веб-панель", webAppURL)))
 	}
 	rows = append(rows, row(cb("⚙️ Настройки", "st"), cb("🔄 Обновить", "m")))
 	return b.render(ctx, ref, sb.String(), &telegram.InlineKeyboardMarkup{InlineKeyboard: rows})
@@ -371,7 +389,7 @@ func (b *Bot) showSettings(ctx context.Context, ref *msgRef) error {
 	if st.DigestEnabled {
 		digest = "вкл, в " + st.DigestTime
 	}
-	fmt.Fprintf(&sb, "🌅 Утренний дайджест: <b>%s</b> (%s)\n", digest, esc(b.cfg.Location.String()))
+	fmt.Fprintf(&sb, "🌅 Утренний дайджест: <b>%s</b> (%s)\n", digest, esc(b.settings.Location().String()))
 	if st.TriagePaused {
 		sb.WriteString("⏸ Триаж: <b>на паузе</b> — новые сообщения сохраняются, но не анализируются\n")
 	} else {
@@ -416,26 +434,16 @@ func (b *Bot) showSettings(ctx context.Context, ref *msgRef) error {
 		row(cb("💬 «Готово!» при закрытии: "+yesNo(st.NotifyDoneOnClose), "sfd")),
 		row(cb("🧪 Проверить ключи AI", "stest")),
 	)
-	if b.cfg.WebAppURL != "" {
-		rows = append(rows, row(webAppButton("🔑 Ключи AI — в веб-панели", b.cfg.WebAppURL)))
+	if st.WebAppPublicURL != "" {
+		rows = append(rows, row(webAppButton("🔑 Все настройки — в веб-панели", st.WebAppPublicURL)))
 	}
 	rows = append(rows, row(cb("♻️ Сброс к .env", "sreset"), cb("🏠 Меню", "m")))
 	return b.render(ctx, ref, sb.String(), &telegram.InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
 func (b *Bot) presets(provider string) []string {
-	switch provider {
-	case domain.ProviderGemini:
-		return b.cfg.GeminiPresets
-	case domain.ProviderGroq:
-		return b.cfg.GroqPresets
-	case domain.ProviderMistral:
-		return b.cfg.MistralPresets
-	case domain.ProviderOpenRouter:
-		return b.cfg.OpenRouterPresets
-	default:
-		return b.cfg.ClaudePresets
-	}
+	st := b.settings.Get()
+	return st.Provider(provider).Presets
 }
 
 func (b *Bot) showModelMenu(ctx context.Context, ref *msgRef, provider string) error {
@@ -457,7 +465,7 @@ func (b *Bot) showModelMenu(ctx context.Context, ref *msgRef, provider string) e
 
 func (b *Bot) showStats(ctx context.Context, ref *msgRef) error {
 	const days = 30
-	s, err := b.tasks.Stats(ctx, days)
+	s, err := b.tasks.Stats(ctx, domain.ScopeAll, days)
 	if err != nil {
 		return b.renderError(ctx, ref, err)
 	}
@@ -498,7 +506,7 @@ func (b *Bot) showStats(ctx context.Context, ref *msgRef) error {
 // ---------- digest ----------
 
 func (b *Bot) sendDigest(ctx context.Context) error {
-	d, err := b.tasks.BuildDigest(ctx)
+	d, err := b.tasks.BuildDigest(ctx, domain.ScopeAll)
 	if err != nil {
 		return err
 	}

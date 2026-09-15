@@ -36,6 +36,16 @@ func (b *Bot) onCallback(ctx context.Context, q *telegram.CallbackQuery) {
 	}
 	defer answer("", false)
 
+	ctx = service.WithActor(ctx, service.Actor{ID: q.From.ID, Name: q.From.FullName()})
+	parts := strings.Split(q.Data, ":")
+	if q.Message != nil && q.Message.Chat.ID != 0 && q.Message.Chat.ID == b.helpdesk.GroupID() {
+		// ticket cards in the helpdesk group: every member of the group is an operator
+		if err := b.groupCallback(ctx, parts, answer); err != nil {
+			b.log.Warn("group callback failed", "data", q.Data, "err", err)
+			answer("❌ "+humanError(err), true)
+		}
+		return
+	}
 	if q.From.ID != b.cfg.OwnerID {
 		answer("⛔ Нет доступа", true)
 		return
@@ -44,7 +54,6 @@ func (b *Bot) onCallback(ctx context.Context, q *telegram.CallbackQuery) {
 	if q.Message != nil && q.Message.Date != 0 {
 		ref = &msgRef{ChatID: q.Message.Chat.ID, MessageID: q.Message.MessageID}
 	}
-	parts := strings.Split(q.Data, ":")
 	if err := b.routeCallback(ctx, ref, parts, answer); err != nil {
 		b.log.Warn("callback failed", "data", q.Data, "err", err)
 		answer("❌ "+humanError(err), true)
@@ -194,20 +203,7 @@ func (b *Bot) setModel(ctx context.Context, provider, model string) error {
 	if !domainProvider(provider) {
 		return domain.ErrInvalidInput
 	}
-	_, err := b.settings.Update(ctx, func(s *domain.Settings) {
-		switch provider {
-		case domain.ProviderGemini:
-			s.GeminiModel = model
-		case domain.ProviderGroq:
-			s.GroqModel = model
-		case domain.ProviderMistral:
-			s.MistralModel = model
-		case domain.ProviderOpenRouter:
-			s.OpenRouterModel = model
-		default:
-			s.ClaudeModel = model
-		}
-	})
+	_, err := b.settings.Update(ctx, func(s *domain.Settings) { s.Provider(provider).Model = model })
 	return err
 }
 
@@ -272,7 +268,8 @@ func (b *Bot) taskAction(ctx context.Context, ref *msgRef, action string, id int
 }
 
 func (b *Bot) snoozeAction(ctx context.Context, ref *msgRef, id int64, opt string, answer func(string, bool)) error {
-	now := time.Now().In(b.cfg.Location)
+	loc := b.settings.Location()
+	now := time.Now().In(loc)
 	var until time.Time
 	switch opt {
 	case "c":
@@ -283,7 +280,7 @@ func (b *Bot) snoozeAction(ctx context.Context, ref *msgRef, id int64, opt strin
 			kb(row(cb("❌ Отмена", "cx"))))
 	case "tm":
 		d := now.AddDate(0, 0, 1)
-		until = time.Date(d.Year(), d.Month(), d.Day(), 9, 0, 0, 0, b.cfg.Location)
+		until = time.Date(d.Year(), d.Month(), d.Day(), 9, 0, 0, 0, loc)
 	default:
 		minutes, err := strconv.Atoi(opt)
 		if err != nil || minutes <= 0 {

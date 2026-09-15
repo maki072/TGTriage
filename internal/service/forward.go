@@ -58,11 +58,12 @@ func (s *TriageService) analyzeForwarded(ctx context.Context, msgs []domain.Mess
 	if conn, err := s.conns.Current(ctx); err == nil {
 		ownerName = conn.UserName
 	}
+	loc := s.settings.Location()
 	in := ai.ForwardInput{
 		OwnerName:  ownerName,
-		OwnerAbout: s.cfg.OwnerAbout,
+		OwnerAbout: st.OwnerAbout,
 		Now:        time.Now(),
-		Location:   s.cfg.Location,
+		Location:   loc,
 		Messages:   msgs,
 	}
 	req := ai.Request{System: ai.ForwardSystemPrompt(in), User: ai.ForwardUserPrompt(in), Schema: ai.AnalysisSchema()}
@@ -108,7 +109,7 @@ func (s *TriageService) analyzeForwarded(ctx context.Context, msgs []domain.Mess
 		Description:    analysis.Description,
 		Priority:       domain.ParsePriority(analysis.Priority),
 		Category:       domain.ParseCategory(analysis.Category),
-		Deadline:       ai.ParseDeadline(analysis.Deadline, s.cfg.Location),
+		Deadline:       ai.ParseDeadline(analysis.Deadline, loc),
 		Confidence:     analysis.Confidence,
 		Status:         domain.StatusNew,
 		AnalysisID:     rec.ID,

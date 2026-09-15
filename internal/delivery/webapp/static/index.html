@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<title>Ассистент</title>
+<title>Хелпдеск</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -12,17 +12,13 @@
 
 <header id="topbar" class="topbar">
   <button id="backBtn" class="icon-btn" hidden aria-label="Назад">←</button>
-  <h1 id="topTitle">Задачи</h1>
+  <h1 id="topTitle">Загрузка…</h1>
   <button id="refreshBtn" class="icon-btn" aria-label="Обновить">⟳</button>
 </header>
 
-<main id="app"></main>
+<main id="app"><div class="loading">Загрузка…</div></main>
 
-<nav id="tabbar" class="tabbar">
-  <button class="tab" data-tab="tasks" aria-label="Задачи"><span class="tab-icon">🗂</span><span>Задачи</span></button>
-  <button class="tab" data-tab="history" aria-label="История"><span class="tab-icon">🕘</span><span>История</span></button>
-  <button class="tab" data-tab="settings" aria-label="Настройки"><span class="tab-icon">⚙️</span><span>Настройки</span></button>
-</nav>
+<nav id="tabbar" class="tabbar"></nav>
 
 <div id="toast" class="toast" hidden></div>
 <div id="modalRoot"></div>

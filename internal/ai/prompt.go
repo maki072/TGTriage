@@ -20,6 +20,9 @@ type TriageInput struct {
 	Context         []domain.Message // earlier conversation, oldest first
 	New             []domain.Message // batch to analyze, oldest first
 	OpenTasks       []domain.Task    // open tasks with this contact
+	// Helpdesk switches to the support desk prompt: OwnerAbout describes the service, Outgoing
+	// messages are the support's replies.
+	Helpdesk bool
 }
 
 // systemPromptTemplate is the triage system prompt. Placeholders: {{OWNER}}, {{ABOUT}}, {{SENSITIVITY}}.
@@ -74,6 +77,9 @@ func sensitivityInstruction(s domain.Sensitivity) string {
 
 // SystemPrompt renders the triage system prompt.
 func SystemPrompt(in TriageInput) string {
+	if in.Helpdesk {
+		return helpdeskSystemPrompt(in)
+	}
 	return strings.NewReplacer(append(ownerPlaceholders(in.OwnerName, in.OwnerAbout),
 		"{{SENSITIVITY}}", sensitivityInstruction(in.Sensitivity))...).Replace(systemPromptTemplate)
 }
@@ -103,7 +109,11 @@ func UserPrompt(in TriageInput) string {
 	if in.ContactUsername != "" {
 		contact += " (@" + in.ContactUsername + ")"
 	}
-	fmt.Fprintf(&b, "CONTACT: %s\n\n", contact)
+	them, us := "CONTACT", "OWNER"
+	if in.Helpdesk {
+		them, us = "USER", "SUPPORT"
+	}
+	fmt.Fprintf(&b, "%s: %s\n\n", them, contact)
 
 	b.WriteString("<open_tasks>\n")
 	if len(in.OpenTasks) == 0 {
@@ -117,20 +127,20 @@ func UserPrompt(in TriageInput) string {
 		b.WriteString("нет\n")
 	}
 	for _, m := range in.Context {
-		writeLine(&b, m, loc)
+		writeLine(&b, m, loc, them, us)
 	}
 	b.WriteString("</context>\n\n<new_messages>\n")
 	for _, m := range in.New {
-		writeLine(&b, m, loc)
+		writeLine(&b, m, loc, them, us)
 	}
 	b.WriteString("</new_messages>")
 	return b.String()
 }
 
-func writeLine(b *strings.Builder, m domain.Message, loc *time.Location) {
-	who := "CONTACT"
+func writeLine(b *strings.Builder, m domain.Message, loc *time.Location, them, us string) {
+	who := them
 	if m.Outgoing {
-		who = "OWNER"
+		who = us
 	}
 	fmt.Fprintf(b, "[%s] %s: %s\n", m.SentAt.In(loc).Format("02.01 15:04"), who, truncateRunes(m.Text, 4000))
 }

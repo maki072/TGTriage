@@ -90,7 +90,7 @@ func TestTasksListAndSnooze(t *testing.T) {
 	if got, _ := s.Tasks.Get(ctx, crit.ID); len(got.SourceMessageIDs) != 2 || got.Deadline == nil {
 		t.Errorf("roundtrip lost fields: %+v", got)
 	}
-	if n, _ := s.Tasks.CountOverdue(ctx, time.Now()); n != 1 {
+	if n, _ := s.Tasks.CountOverdue(ctx, domain.ScopeAll, time.Now()); n != 1 {
 		t.Errorf("overdue: %d", n)
 	}
 

@@ -1,6 +1,10 @@
 package domain
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 const (
 	ProviderClaude     = "claude"
@@ -66,42 +70,163 @@ func (s Sensitivity) Threshold() float64 {
 	}
 }
 
-// Settings are runtime-tunable options (persisted, editable from the bot).
+// ProviderSettings configures one LLM adapter.
+type ProviderSettings struct {
+	Model     string
+	Presets   []string
+	MaxTokens int
+	BaseURL   string
+}
+
+// Settings are runtime-tunable options, persisted in the DB and editable from the Mini App (and partly
+// from the bot). Only bootstrap values (bot token, owner, DB path, listen address, proxy) live in env.
 type Settings struct {
 	// AIChain is tried top to bottom for every LLM call: when an entry fails, the next one is used.
 	AIChain         []AIKey
-	ClaudeModel     string
-	GeminiModel     string
-	GroqModel       string
-	MistralModel    string
-	OpenRouterModel string
-	DebounceSeconds int
-	Sensitivity     Sensitivity
-	DigestEnabled   bool
-	DigestTime      string // HH:MM in service timezone
-	TriagePaused    bool
-	MarkReadOnWork  bool
+	Claude          ProviderSettings
+	Gemini          ProviderSettings
+	Groq            ProviderSettings
+	Mistral         ProviderSettings
+	OpenRouter      ProviderSettings
+	ClaudeEffort    string
+	ClaudeFallbacks bool
+	AITimeoutSec    int
+	AIMaxRetries    int
+	AnalysisWorkers int // applied on restart
+
+	DebounceSeconds        int
+	DebounceMaxWaitSeconds int
+	ContextMessages        int
+	NoisePrefilter         bool
+	Sensitivity            Sensitivity
+	TriagePaused           bool
+	MarkReadOnWork         bool
 	// NotifyDoneOnClose: when closing a task with "✅ Закрыть", offer to send a "Готово!" message
 	// to the contact. Opt-in; when on, the bot still asks for confirmation every time rather than
 	// sending it automatically.
 	NotifyDoneOnClose bool
+	OwnerAbout        string
+	DeepLinks         bool
+
+	DigestEnabled bool
+	DigestTime    string // HH:MM in service timezone
+	Timezone      string // IANA name
+
+	WebAppPublicURL string
+	RetentionDays   int
+
+	Helpdesk HelpdeskSettings
+	Backup   BackupSettings
+}
+
+// HelpdeskSettings configure the support desk: users write to the bot, operators answer in forum topics.
+type HelpdeskSettings struct {
+	Enabled          bool
+	GroupID          int64 // forum supergroup with operators
+	TriageEnabled    bool
+	About            string // what the support desk is about, for the LLM
+	GreetingEnabled  bool
+	GreetingText     string
+	AutoReplyEnabled bool
+	AutoReplyText    string
+	HoursEnabled     bool
+	HoursStart       string // HH:MM
+	HoursEnd         string // HH:MM
+	HoursDays        string // ISO weekday digits, "12345" = Mon..Fri
+	OffHoursText     string // {hours} is replaced with HoursLabel()
+	ReminderMinutes  int    // 0 = no reminders about unanswered users
+}
+
+// Active reports whether the desk is switched on and has a group to work in.
+func (h HelpdeskSettings) Active() bool { return h.Enabled && h.GroupID != 0 }
+
+// InWorkingHours reports whether t (already in the service timezone) falls into working hours.
+// With working hours switched off every moment is a working one.
+func (h HelpdeskSettings) InWorkingHours(t time.Time) bool {
+	if !h.HoursEnabled {
+		return true
+	}
+	wd := int(t.Weekday())
+	if wd == 0 {
+		wd = 7
+	}
+	start, okS := clockMinutes(h.HoursStart)
+	end, okE := clockMinutes(h.HoursEnd)
+	if !okS || !okE {
+		return true
+	}
+	m := t.Hour()*60 + t.Minute()
+	today := strings.ContainsRune(h.HoursDays, rune('0'+wd))
+	if start <= end {
+		return today && m >= start && m < end
+	}
+	// overnight shift, e.g. 22:00–06:00: the early-morning part belongs to the previous day's shift
+	prev := wd - 1
+	if prev == 0 {
+		prev = 7
+	}
+	return today && m >= start || strings.ContainsRune(h.HoursDays, rune('0'+prev)) && m < end
+}
+
+// HoursLabel renders working hours for users, e.g. "пн–пт 09:00–18:00".
+func (h HelpdeskSettings) HoursLabel() string {
+	names := [...]string{"", "пн", "вт", "ср", "чт", "пт", "сб", "вс"}
+	var parts []string
+	for d := 1; d <= 7; d++ {
+		if !strings.ContainsRune(h.HoursDays, rune('0'+d)) {
+			continue
+		}
+		end := d
+		for end+1 <= 7 && strings.ContainsRune(h.HoursDays, rune('0'+end+1)) {
+			end++
+		}
+		switch {
+		case end == d:
+			parts = append(parts, names[d])
+		case end == d+1:
+			parts = append(parts, names[d], names[end])
+		default:
+			parts = append(parts, names[d]+"–"+names[end])
+		}
+		d = end
+	}
+	return strings.TrimSpace(strings.Join(parts, ", ") + " " + h.HoursStart + "–" + h.HoursEnd)
+}
+
+func clockMinutes(s string) (int, bool) {
+	t, err := time.Parse("15:04", strings.TrimSpace(s))
+	if err != nil {
+		return 0, false
+	}
+	return t.Hour()*60 + t.Minute(), true
+}
+
+// BackupSettings configure scheduled database backups.
+type BackupSettings struct {
+	Enabled      bool
+	Time         string // HH:MM in service timezone
+	Keep         int    // how many backup files stay on disk
+	SendTelegram bool   // send every backup to the owner's chat with the bot
+}
+
+// Provider returns the settings of the given provider (Claude for unknown names).
+func (s *Settings) Provider(name string) *ProviderSettings {
+	switch name {
+	case ProviderGemini:
+		return &s.Gemini
+	case ProviderGroq:
+		return &s.Groq
+	case ProviderMistral:
+		return &s.Mistral
+	case ProviderOpenRouter:
+		return &s.OpenRouter
+	default:
+		return &s.Claude
+	}
 }
 
 // ModelFor returns configured model for provider.
-func (s Settings) ModelFor(provider string) string {
-	switch provider {
-	case ProviderGemini:
-		return s.GeminiModel
-	case ProviderGroq:
-		return s.GroqModel
-	case ProviderMistral:
-		return s.MistralModel
-	case ProviderOpenRouter:
-		return s.OpenRouterModel
-	default:
-		return s.ClaudeModel
-	}
-}
+func (s Settings) ModelFor(provider string) string { return s.Provider(provider).Model }
 
 // Primary returns the first AI chain entry — the one used while it works.
 func (s Settings) Primary() (AIKey, bool) {
@@ -124,4 +249,21 @@ func (s Settings) ChainProviders() []string {
 		}
 	}
 	return out
+}
+
+// Location resolves the configured timezone, falling back to UTC.
+func (s Settings) Location() *time.Location {
+	if loc, err := time.LoadLocation(s.Timezone); err == nil && s.Timezone != "" {
+		return loc
+	}
+	return time.UTC
+}
+
+// TopicLink returns a t.me link to a forum topic of a supergroup (-100… chat id).
+func TopicLink(groupID int64, topicID int) string {
+	internal := strings.TrimPrefix(fmt.Sprint(groupID), "-100")
+	if topicID == 0 {
+		return "https://t.me/c/" + internal
+	}
+	return fmt.Sprintf("https://t.me/c/%s/%d", internal, topicID)
 }

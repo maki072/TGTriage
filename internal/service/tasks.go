@@ -15,6 +15,16 @@ type ReplySender interface {
 	MarkRead(ctx context.Context, connectionID string, chatID int64, messageID int) error
 }
 
+// HelpdeskReplier sends a reply to a support desk user.
+type HelpdeskReplier interface {
+	ReplyToUser(ctx context.Context, userID int64, text string) error
+}
+
+// TaskObserver is told about every task change made through TaskService (status, snooze, replies).
+type TaskObserver interface {
+	TaskChanged(ctx context.Context, t *domain.Task)
+}
+
 // TaskService implements task management use cases.
 type TaskService struct {
 	tasks    domain.TaskRepository
@@ -23,14 +33,34 @@ type TaskService struct {
 	conns    *ConnectionService
 	settings *SettingsService
 	sender   ReplySender
-	loc      *time.Location
+	helpdesk HelpdeskReplier
+	observer TaskObserver
 	log      *slog.Logger
 }
 
 func NewTaskService(tasks domain.TaskRepository, messages domain.MessageRepository, analyses domain.AnalysisRepository,
-	conns *ConnectionService, settings *SettingsService, sender ReplySender, loc *time.Location, log *slog.Logger) *TaskService {
+	conns *ConnectionService, settings *SettingsService, sender ReplySender, log *slog.Logger) *TaskService {
 	return &TaskService{tasks: tasks, messages: messages, analyses: analyses, conns: conns, settings: settings,
-		sender: sender, loc: loc, log: log.With("component", "tasks")}
+		sender: sender, log: log.With("component", "tasks")}
+}
+
+// SetHelpdesk wires replies to support desk tickets.
+func (s *TaskService) SetHelpdesk(h HelpdeskReplier) { s.helpdesk = h }
+
+// SetObserver wires the task change observer (ticket cards in the helpdesk group).
+func (s *TaskService) SetObserver(o TaskObserver) { s.observer = o }
+
+func (s *TaskService) changed(ctx context.Context, t *domain.Task) {
+	if s.observer == nil {
+		return
+	}
+	cp := *t
+	actorCtx := WithActor(context.WithoutCancel(ctx), ActorFrom(ctx))
+	go func() {
+		ctx, cancel := context.WithTimeout(actorCtx, 30*time.Second)
+		defer cancel()
+		s.observer.TaskChanged(ctx, &cp)
+	}()
 }
 
 func (s *TaskService) Get(ctx context.Context, id int64) (*domain.Task, error) {
@@ -67,12 +97,13 @@ func (s *TaskService) SetStatus(ctx context.Context, id int64, status domain.Tas
 	if status == domain.StatusInProgress && prev != domain.StatusInProgress && s.settings.Get().MarkReadOnWork {
 		s.markRead(ctx, t)
 	}
+	s.changed(ctx, t)
 	return t, nil
 }
 
 func (s *TaskService) markRead(ctx context.Context, t *domain.Task) {
 	msgID := t.LastSourceMessageID()
-	if msgID == 0 {
+	if msgID == 0 || t.IsHelpdesk() {
 		return
 	}
 	conn, err := s.conns.Resolve(ctx, t.ConnectionID)
@@ -109,6 +140,7 @@ func (s *TaskService) Snooze(ctx context.Context, id int64, until time.Time) (*d
 	if err := s.tasks.Update(ctx, t); err != nil {
 		return nil, err
 	}
+	s.changed(ctx, t)
 	return t, nil
 }
 
@@ -131,6 +163,7 @@ func (s *TaskService) WakeSnoozed(ctx context.Context) ([]domain.Task, error) {
 			s.log.Error("wake snoozed task", "task_id", t.ID, "err", err)
 			continue
 		}
+		s.changed(ctx, &t)
 		woken = append(woken, t)
 	}
 	return woken, nil
@@ -151,12 +184,23 @@ func (s *TaskService) SendDraft(ctx context.Context, id int64) (*domain.Task, er
 // DoneMessage is the confirmation text offered when closing a task with a notice to the contact.
 const DoneMessage = "Готово!"
 
-// sendToContact resolves the business connection, checks reply permission, sends text and records
-// it as an outgoing message. It mutates t in memory (ReplySentAt/ReplyText); the caller persists t
-// and decides the resulting status.
+// sendToContact delivers text to the task's contact: a support desk user via the bot, a Business chat
+// on behalf of the owner. It mutates t in memory (ReplySentAt/ReplyText); the caller persists t.
 func (s *TaskService) sendToContact(ctx context.Context, t *domain.Task, text string) error {
 	if !t.HasChat() {
 		return domain.ErrNoSourceChat
+	}
+	now := time.Now()
+	if t.IsHelpdesk() {
+		if s.helpdesk == nil {
+			return domain.ErrHelpdeskOff
+		}
+		if err := s.helpdesk.ReplyToUser(ctx, t.ChatID, text); err != nil {
+			return err
+		}
+		t.ReplySentAt = &now
+		t.ReplyText = text
+		return nil
 	}
 	conn, err := s.conns.Resolve(ctx, t.ConnectionID)
 	if err != nil {
@@ -169,7 +213,6 @@ func (s *TaskService) sendToContact(ctx context.Context, t *domain.Task, text st
 	if err != nil {
 		return err
 	}
-	now := time.Now()
 	if _, err := s.messages.Save(ctx, &domain.Message{
 		ConnectionID: conn.ID, ChatID: t.ChatID, MessageID: msgID, SenderID: conn.UserID, SenderName: conn.UserName,
 		Outgoing: true, Text: text, SentAt: now, Analyzed: true,
@@ -181,7 +224,7 @@ func (s *TaskService) sendToContact(ctx context.Context, t *domain.Task, text st
 	return nil
 }
 
-// SendReply sends text into the source chat via Telegram Business on behalf of the owner.
+// SendReply sends text to the task's contact.
 func (s *TaskService) SendReply(ctx context.Context, id int64, text string) (*domain.Task, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -201,6 +244,7 @@ func (s *TaskService) SendReply(ctx context.Context, id int64, text string) (*do
 		return nil, err
 	}
 	s.log.Info("reply sent", "task_id", t.ID, "chat_id", t.ChatID)
+	s.changed(ctx, t)
 	return t, nil
 }
 
@@ -227,6 +271,7 @@ func (s *TaskService) CloseWithMessage(ctx context.Context, id int64, text strin
 		return nil, err
 	}
 	s.log.Info("task closed with message", "task_id", t.ID, "chat_id", t.ChatID)
+	s.changed(ctx, t)
 	return t, nil
 }
 
@@ -243,17 +288,18 @@ type Digest struct {
 
 func (d *Digest) Empty() bool { return d.New+d.InProgress+d.Snoozed == 0 }
 
-// BuildDigest collects open tasks into digest sections.
-func (s *TaskService) BuildDigest(ctx context.Context) (*Digest, error) {
+// BuildDigest collects open tasks of the scope into digest sections.
+func (s *TaskService) BuildDigest(ctx context.Context, scope domain.TaskScope) (*Digest, error) {
 	open, _, err := s.tasks.List(ctx, domain.TaskFilter{
 		Statuses: []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed},
+		Scope:    scope,
 		Limit:    1000,
 	})
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now()
-	d := &Digest{Date: now.In(s.loc)}
+	d := &Digest{Date: now.In(s.settings.Location())}
 	for _, t := range open {
 		switch t.Status {
 		case domain.StatusNew:
@@ -282,12 +328,12 @@ type Overview struct {
 	Connection                        *domain.BusinessConnection
 }
 
-func (s *TaskService) Overview(ctx context.Context) (*Overview, error) {
-	counts, err := s.tasks.CountByStatus(ctx, time.Time{})
+func (s *TaskService) Overview(ctx context.Context, scope domain.TaskScope) (*Overview, error) {
+	counts, err := s.tasks.CountByStatus(ctx, scope, time.Time{})
 	if err != nil {
 		return nil, err
 	}
-	overdue, err := s.tasks.CountOverdue(ctx, time.Now())
+	overdue, err := s.tasks.CountOverdue(ctx, scope, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -310,9 +356,9 @@ type Stats struct {
 	Analyses *domain.AnalysisStats
 }
 
-func (s *TaskService) Stats(ctx context.Context, days int) (*Stats, error) {
+func (s *TaskService) Stats(ctx context.Context, scope domain.TaskScope, days int) (*Stats, error) {
 	since := time.Now().AddDate(0, 0, -days)
-	counts, err := s.tasks.CountByStatus(ctx, since)
+	counts, err := s.tasks.CountByStatus(ctx, scope, since)
 	if err != nil {
 		return nil, err
 	}

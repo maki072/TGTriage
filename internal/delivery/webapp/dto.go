@@ -11,33 +11,44 @@ import (
 	"tgtriage/internal/service"
 )
 
+// Me describes the Mini App user.
+type Me struct {
+	UserID          int64  `json:"user_id"`
+	Name            string `json:"name"`
+	Role            string `json:"role"`     // owner | operator
+	Helpdesk        bool   `json:"helpdesk"` // enabled and configured
+	HelpdeskEnabled bool   `json:"helpdesk_enabled"`
+}
+
 // Task is the JSON representation of domain.Task for the Mini App.
 type Task struct {
-	ID             int64   `json:"id"`
-	ChatID         int64   `json:"chat_id"`
-	Forwarded      bool    `json:"forwarded"` // created from a forwarded message: no chat to reply to
-	SenderName     string  `json:"sender_name"`
-	SenderUsername string  `json:"sender_username"`
-	ProfileURL     string  `json:"profile_url"`
-	Title          string  `json:"title"`
-	Description    string  `json:"description"`
-	SourceText     string  `json:"source_text"`
-	Priority       string  `json:"priority"`
-	Category       string  `json:"category"`
-	Status         string  `json:"status"`
-	Deadline       *string `json:"deadline"`
-	Overdue        bool    `json:"overdue"`
-	SnoozeUntil    *string `json:"snooze_until"`
-	DraftReply     string  `json:"draft_reply"`
-	ReplyStrategy  string  `json:"reply_strategy"`
-	ReplySentAt    *string `json:"reply_sent_at"`
-	ReplyText      string  `json:"reply_text"`
-	Confidence     float64 `json:"confidence"`
-	Provider       string  `json:"provider"`
-	Model          string  `json:"model"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
-	ClosedAt       *string `json:"closed_at"`
+	ID             int64         `json:"id"`
+	ChatID         int64         `json:"chat_id"`
+	Forwarded      bool          `json:"forwarded"` // created from a forwarded message: no chat to reply to
+	Helpdesk       bool          `json:"helpdesk"`
+	HelpdeskUser   *HelpdeskUser `json:"helpdesk_user,omitempty"`
+	SenderName     string        `json:"sender_name"`
+	SenderUsername string        `json:"sender_username"`
+	ProfileURL     string        `json:"profile_url"`
+	Title          string        `json:"title"`
+	Description    string        `json:"description"`
+	SourceText     string        `json:"source_text"`
+	Priority       string        `json:"priority"`
+	Category       string        `json:"category"`
+	Status         string        `json:"status"`
+	Deadline       *string       `json:"deadline"`
+	Overdue        bool          `json:"overdue"`
+	SnoozeUntil    *string       `json:"snooze_until"`
+	DraftReply     string        `json:"draft_reply"`
+	ReplyStrategy  string        `json:"reply_strategy"`
+	ReplySentAt    *string       `json:"reply_sent_at"`
+	ReplyText      string        `json:"reply_text"`
+	Confidence     float64       `json:"confidence"`
+	Provider       string        `json:"provider"`
+	Model          string        `json:"model"`
+	CreatedAt      string        `json:"created_at"`
+	UpdatedAt      string        `json:"updated_at"`
+	ClosedAt       *string       `json:"closed_at"`
 }
 
 func fmtTime(t time.Time, loc *time.Location) string { return t.In(loc).Format(time.RFC3339) }
@@ -60,7 +71,7 @@ func profileURL(username string, userID int64) string {
 func toTaskDTO(t domain.Task, loc *time.Location) Task {
 	now := time.Now()
 	return Task{
-		ID: t.ID, ChatID: t.ChatID, Forwarded: !t.HasChat(),
+		ID: t.ID, ChatID: t.ChatID, Forwarded: !t.HasChat(), Helpdesk: t.IsHelpdesk(),
 		SenderName: t.SenderName, SenderUsername: t.SenderUsername,
 		ProfileURL:    profileURL(t.SenderUsername, t.SenderID),
 		Title:         t.Title,
@@ -101,6 +112,54 @@ type TaskList struct {
 	Offset int    `json:"offset"`
 }
 
+// HelpdeskUser is the JSON view of a support desk user.
+type HelpdeskUser struct {
+	UserID        int64   `json:"user_id"`
+	Name          string  `json:"name"`
+	Username      string  `json:"username"`
+	LanguageCode  string  `json:"language_code"`
+	Source        string  `json:"source"`
+	ProfileURL    string  `json:"profile_url"`
+	TopicURL      string  `json:"topic_url"`
+	TopicClosed   bool    `json:"topic_closed"`
+	Blocked       bool    `json:"blocked"`
+	AwaitingSince *string `json:"awaiting_since"`
+	LastMessageAt *string `json:"last_message_at"`
+	CreatedAt     string  `json:"created_at"`
+}
+
+func toHDUserDTO(u *domain.HelpdeskUser, topicURL string, loc *time.Location) HelpdeskUser {
+	return HelpdeskUser{
+		UserID: u.UserID, Name: u.Name, Username: u.Username, LanguageCode: u.LanguageCode, Source: u.Source,
+		ProfileURL: profileURL(u.Username, u.UserID), TopicURL: topicURL, TopicClosed: u.TopicClosed, Blocked: u.Blocked,
+		AwaitingSince: fmtTimePtr(u.AwaitingSince, loc), LastMessageAt: fmtTimePtr(u.LastMessageAt, loc),
+		CreatedAt: fmtTime(u.CreatedAt, loc),
+	}
+}
+
+// DialogMessage is one message of a helpdesk conversation.
+type DialogMessage struct {
+	ID       int64  `json:"id"`
+	Outgoing bool   `json:"outgoing"`
+	Text     string `json:"text"`
+	SentAt   string `json:"sent_at"`
+}
+
+func toDialogMessages(msgs []domain.Message, loc *time.Location) []DialogMessage {
+	out := make([]DialogMessage, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, DialogMessage{ID: m.ID, Outgoing: m.Outgoing, Text: m.Text, SentAt: fmtTime(m.SentAt, loc)})
+	}
+	return out
+}
+
+// HelpdeskDialog is a user with the conversation and tickets.
+type HelpdeskDialog struct {
+	User     HelpdeskUser    `json:"user"`
+	Messages []DialogMessage `json:"messages"`
+	Tickets  []Task          `json:"tickets"`
+}
+
 // Connection is the JSON view of the owner's Business connection.
 type Connection struct {
 	Name     string `json:"name"`
@@ -115,6 +174,7 @@ type Overview struct {
 	InProgress int         `json:"in_progress"`
 	Snoozed    int         `json:"snoozed"`
 	Overdue    int         `json:"overdue"`
+	Awaiting   int         `json:"awaiting"` // helpdesk users waiting for an answer
 	Connection *Connection `json:"connection"`
 }
 
@@ -178,7 +238,7 @@ type AIKey struct {
 }
 
 // keyID identifies a stored API key to the Mini App without revealing it: the frontend echoes it
-// back for rows the owner didn't retype, and settingsPatch swaps it for the real key.
+// back for rows the owner didn't retype, and applyChain swaps it for the real key.
 func keyID(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:6])
@@ -192,27 +252,18 @@ func toAIChainDTO(chain []domain.AIKey) []AIKey {
 	return out
 }
 
-// Settings is the JSON view of domain.Settings plus the choices available for each field.
+// SettingValue is a setting description with its current value.
+type SettingValue struct {
+	service.SettingField
+	Value any `json:"value"`
+}
+
+// Settings is the settings screen: field schema with values plus the AI chain.
 type Settings struct {
-	AIChain           []AIKey  `json:"ai_chain"`
-	ClaudeModel       string   `json:"claude_model"`
-	GeminiModel       string   `json:"gemini_model"`
-	GroqModel         string   `json:"groq_model"`
-	MistralModel      string   `json:"mistral_model"`
-	OpenRouterModel   string   `json:"openrouter_model"`
-	DebounceSeconds   int      `json:"debounce_seconds"`
-	Sensitivity       string   `json:"sensitivity"`
-	DigestEnabled     bool     `json:"digest_enabled"`
-	DigestTime        string   `json:"digest_time"`
-	TriagePaused      bool     `json:"triage_paused"`
-	MarkReadOnWork    bool     `json:"mark_read_on_work"`
-	NotifyDoneOnClose bool     `json:"notify_done_on_close"`
-	Providers         []string `json:"providers"`
-	ClaudePresets     []string `json:"claude_presets"`
-	GeminiPresets     []string `json:"gemini_presets"`
-	GroqPresets       []string `json:"groq_presets"`
-	MistralPresets    []string `json:"mistral_presets"`
-	OpenRouterPresets []string `json:"openrouter_presets"`
+	Groups    []service.SettingGroup `json:"groups"`
+	Fields    []SettingValue         `json:"fields"`
+	AIChain   []AIKey                `json:"ai_chain"`
+	Providers []string               `json:"providers"`
 }
 
 // aiKeyPatch is one row of a saved AI chain: either a newly typed Key, or the KeyID of a key the
@@ -223,75 +274,20 @@ type aiKeyPatch struct {
 	KeyID    string `json:"key_id"`
 }
 
-// settingsPatch is a partial update; nil fields are left untouched.
-type settingsPatch struct {
-	AIChain           *[]aiKeyPatch `json:"ai_chain"`
-	ClaudeModel       *string       `json:"claude_model"`
-	GeminiModel       *string       `json:"gemini_model"`
-	GroqModel         *string       `json:"groq_model"`
-	MistralModel      *string       `json:"mistral_model"`
-	OpenRouterModel   *string       `json:"openrouter_model"`
-	DebounceSeconds   *int          `json:"debounce_seconds"`
-	Sensitivity       *string       `json:"sensitivity"`
-	DigestEnabled     *bool         `json:"digest_enabled"`
-	DigestTime        *string       `json:"digest_time"`
-	TriagePaused      *bool         `json:"triage_paused"`
-	MarkReadOnWork    *bool         `json:"mark_read_on_work"`
-	NotifyDoneOnClose *bool         `json:"notify_done_on_close"`
-}
-
-func (p settingsPatch) apply(s *domain.Settings) {
-	if p.AIChain != nil {
-		chain := make([]domain.AIKey, 0, len(*p.AIChain))
-		for _, e := range *p.AIChain {
-			key := strings.TrimSpace(e.Key)
-			if key == "" && e.KeyID != "" {
-				for _, old := range s.AIChain {
-					if keyID(old.Key) == e.KeyID {
-						key = old.Key
-						break
-					}
+func applyChain(s *domain.Settings, rows []aiKeyPatch) {
+	chain := make([]domain.AIKey, 0, len(rows))
+	for _, e := range rows {
+		key := strings.TrimSpace(e.Key)
+		if key == "" && e.KeyID != "" {
+			for _, old := range s.AIChain {
+				if keyID(old.Key) == e.KeyID {
+					key = old.Key
+					break
 				}
 			}
-			// An unresolved row keeps an empty key and is rejected by settings validation.
-			chain = append(chain, domain.AIKey{Provider: e.Provider, Key: key})
 		}
-		s.AIChain = chain
+		// An unresolved row keeps an empty key and is rejected by settings validation.
+		chain = append(chain, domain.AIKey{Provider: e.Provider, Key: key})
 	}
-	if p.ClaudeModel != nil {
-		s.ClaudeModel = *p.ClaudeModel
-	}
-	if p.GeminiModel != nil {
-		s.GeminiModel = *p.GeminiModel
-	}
-	if p.GroqModel != nil {
-		s.GroqModel = *p.GroqModel
-	}
-	if p.MistralModel != nil {
-		s.MistralModel = *p.MistralModel
-	}
-	if p.OpenRouterModel != nil {
-		s.OpenRouterModel = *p.OpenRouterModel
-	}
-	if p.DebounceSeconds != nil {
-		s.DebounceSeconds = *p.DebounceSeconds
-	}
-	if p.Sensitivity != nil {
-		s.Sensitivity = domain.Sensitivity(*p.Sensitivity)
-	}
-	if p.DigestEnabled != nil {
-		s.DigestEnabled = *p.DigestEnabled
-	}
-	if p.DigestTime != nil {
-		s.DigestTime = *p.DigestTime
-	}
-	if p.TriagePaused != nil {
-		s.TriagePaused = *p.TriagePaused
-	}
-	if p.MarkReadOnWork != nil {
-		s.MarkReadOnWork = *p.MarkReadOnWork
-	}
-	if p.NotifyDoneOnClose != nil {
-		s.NotifyDoneOnClose = *p.NotifyDoneOnClose
-	}
+	s.AIChain = chain
 }

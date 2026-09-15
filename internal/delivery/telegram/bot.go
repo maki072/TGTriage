@@ -1,5 +1,5 @@
-// Package tgbot is the Telegram delivery layer: it routes Bot API updates to use cases
-// and renders the owner's task-manager interface (inline keyboards, cards, settings).
+// Package tgbot is the Telegram delivery layer: it routes Bot API updates to use cases, renders the
+// owner's task-manager interface and relays the support desk between users and the operators' group.
 package tgbot
 
 import (
@@ -14,18 +14,12 @@ import (
 
 // Config of the delivery layer.
 type Config struct {
-	OwnerID           int64
-	Location          *time.Location
-	ClaudePresets     []string
-	GeminiPresets     []string
-	GroqPresets       []string
-	MistralPresets    []string
-	OpenRouterPresets []string
-	DeepLinks         bool   // add tg:// links to the source message in task cards
-	WebAppURL         string // public https:// URL of the Mini App; empty hides the "🌐 Открыть веб-панель" button
+	OwnerID     int64
+	BotID       int64
+	BotUsername string
 }
 
-// Bot handles updates and implements service.Notifier and service.SchedulerNotifier.
+// Bot handles updates and implements service.Notifier, service.SchedulerNotifier and service.TaskObserver.
 type Bot struct {
 	api      *telegram.Client
 	cfg      Config
@@ -33,6 +27,7 @@ type Bot struct {
 	triage   *service.TriageService
 	settings *service.SettingsService
 	conns    *service.ConnectionService
+	helpdesk *service.HelpdeskService
 	states   *stateStore
 	log      *slog.Logger
 }
@@ -40,12 +35,13 @@ type Bot struct {
 var (
 	_ service.Notifier          = (*Bot)(nil)
 	_ service.SchedulerNotifier = (*Bot)(nil)
+	_ service.TaskObserver      = (*Bot)(nil)
 )
 
 func New(api *telegram.Client, cfg Config, tasks *service.TaskService, settings *service.SettingsService,
-	conns *service.ConnectionService, log *slog.Logger) *Bot {
+	conns *service.ConnectionService, helpdesk *service.HelpdeskService, log *slog.Logger) *Bot {
 	return &Bot{
-		api: api, cfg: cfg, tasks: tasks, settings: settings, conns: conns,
+		api: api, cfg: cfg, tasks: tasks, settings: settings, conns: conns, helpdesk: helpdesk,
 		states: newStateStore(), log: log.With("component", "bot"),
 	}
 }
@@ -53,7 +49,7 @@ func New(api *telegram.Client, cfg Config, tasks *service.TaskService, settings 
 // SetTriage wires the triage service (it depends on Bot as a notifier).
 func (b *Bot) SetTriage(t *service.TriageService) { b.triage = t }
 
-var commands = []telegram.BotCommand{
+var ownerCommands = []telegram.BotCommand{
 	{Command: "menu", Description: "Главное меню"},
 	{Command: "tasks", Description: "Активные задачи"},
 	{Command: "urgent", Description: "Срочные задачи"},
@@ -64,10 +60,16 @@ var commands = []telegram.BotCommand{
 	{Command: "help", Description: "Справка"},
 }
 
+// Everyone else — support desk users — only needs /start; owner commands are scoped to the owner's chat.
+var publicCommands = []telegram.BotCommand{{Command: "start", Description: "Начать"}}
+
 // Run starts long polling; blocks until ctx is cancelled.
 func (b *Bot) Run(ctx context.Context) {
-	if err := b.api.SetMyCommands(ctx, commands); err != nil {
+	if err := b.api.SetMyCommands(ctx, publicCommands); err != nil {
 		b.log.Warn("setMyCommands failed", "err", err)
+	}
+	if err := b.api.SetMyCommandsForChat(ctx, b.cfg.OwnerID, ownerCommands); err != nil {
+		b.log.Warn("setMyCommands for owner failed", "err", err)
 	}
 	b.api.Poll(ctx, b.handle)
 }
@@ -92,8 +94,21 @@ func (b *Bot) handle(ctx context.Context, u telegram.Update) {
 		b.onDeletedBusinessMessages(hctx, u.DeletedBusinessMessages)
 	case u.CallbackQuery != nil:
 		b.onCallback(hctx, u.CallbackQuery)
+	case u.MyChatMember != nil:
+		b.onMyChatMember(hctx, u.MyChatMember)
+	case u.EditedMessage != nil:
+		b.onEditedMessage(hctx, u.EditedMessage)
 	case u.Message != nil:
-		b.onPrivateMessage(hctx, u.Message)
+		b.onMessage(hctx, u.Message)
+	}
+}
+
+func (b *Bot) onMessage(ctx context.Context, m *telegram.Message) {
+	switch {
+	case m.Chat.Type == "private":
+		b.onPrivateMessage(ctx, m)
+	case m.Chat.ID != 0 && m.Chat.ID == b.helpdesk.GroupID():
+		b.onGroupMessage(ctx, m)
 	}
 }
 
@@ -119,8 +134,14 @@ func (b *Bot) render(ctx context.Context, ref *msgRef, text string, markup *tele
 		}
 		b.log.Debug("edit failed, sending a new message", "err", err)
 	}
+	return b.sendTo(ctx, b.cfg.OwnerID, text, markup)
+}
+
+// sendTo sends an HTML message to any private chat.
+func (b *Bot) sendTo(ctx context.Context, chatID int64, text string, markup *telegram.InlineKeyboardMarkup) error {
 	_, err := b.api.SendMessage(ctx, telegram.SendMessageParams{
-		ChatID: b.cfg.OwnerID, Text: text, ParseMode: "HTML", ReplyMarkup: markup, LinkPreviewOptions: noPreview,
+		ChatID: chatID, Text: text, ParseMode: "HTML", ReplyMarkup: markup,
+		LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true},
 	})
 	return err
 }
@@ -131,27 +152,4 @@ func (b *Bot) sendText(ctx context.Context, text string, markup *telegram.Inline
 
 func (b *Bot) renderError(ctx context.Context, ref *msgRef, err error) error {
 	return b.render(ctx, ref, "❌ "+esc(humanError(err)), kb(row(cb("🏠 Меню", "m"))))
-}
-
-// Gateway adapts the Bot API client to service.ReplySender.
-type Gateway struct{ api *telegram.Client }
-
-var _ service.ReplySender = (*Gateway)(nil)
-
-func NewGateway(api *telegram.Client) *Gateway { return &Gateway{api: api} }
-
-func (g *Gateway) SendBusinessText(ctx context.Context, connectionID string, chatID int64, text string) (int, error) {
-	m, err := g.api.SendMessage(ctx, telegram.SendMessageParams{
-		BusinessConnectionID: connectionID,
-		ChatID:               chatID,
-		Text:                 text,
-	})
-	if err != nil {
-		return 0, err
-	}
-	return m.MessageID, nil
-}
-
-func (g *Gateway) MarkRead(ctx context.Context, connectionID string, chatID int64, messageID int) error {
-	return g.api.ReadBusinessMessage(ctx, connectionID, chatID, messageID)
 }

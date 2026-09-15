@@ -28,22 +28,41 @@ const helpText = `🤖 <b>Персональный ассистент на Teleg
 /cancel — отменить ввод
 
 <b>Пересылка</b>
-Перешлите боту сообщение (или сразу несколько) из любого чата — чужое или своё, — и оно станет задачей.
+Перешлите боту сообщение (или сразу несколько) из любого чата — чужое или своё, — и оно станет задачей. Сообщение пользователя хелпдеска станет тикетом.
+
+<b>Хелпдеск</b>
+Пользователи пишут боту, операторы отвечают в темах супергруппы. Настройка — в веб-панели.
 
 <b>Подключение</b>
 Telegram → Настройки → Telegram Business → Чат-боты → укажите этого бота и разрешите «Отвечать на сообщения» (и «Читать сообщения» — для отметки прочитанным).`
 
 func (b *Bot) onPrivateMessage(ctx context.Context, m *telegram.Message) {
-	if m.Chat.Type != "private" {
+	if m.From == nil {
 		return
 	}
-	if m.From == nil || m.From.ID != b.cfg.OwnerID {
-		b.log.Warn("message from non-owner ignored", "user_id", m.Chat.ID)
-		return
+	ctx = service.WithActor(ctx, service.Actor{ID: m.From.ID, Name: m.From.FullName()})
+	switch {
+	case m.From.ID == b.cfg.OwnerID:
+		b.onOwnerMessage(ctx, m)
+	case b.helpdesk.Active() && b.helpdesk.IsOperator(ctx, m.From.ID):
+		b.onOperatorPrivate(ctx, m)
+	default:
+		b.onUserPrivate(ctx, m)
 	}
+}
+
+func (b *Bot) onOwnerMessage(ctx context.Context, m *telegram.Message) {
 	if m.ForwardOrigin != nil {
-		b.onForward(ctx, m)
+		if !b.forwardToHelpdesk(ctx, m) {
+			b.onForward(ctx, m)
+		}
 		return
+	}
+	if cmd, arg := parseCommand(m.Text); cmd == "/start" && strings.HasPrefix(arg, "t") {
+		if id, err := strconv.ParseInt(arg[1:], 10, 64); err == nil {
+			b.sendTicketLink(ctx, m.Chat.ID, id)
+			return
+		}
 	}
 	text := strings.TrimSpace(m.Text)
 	if text == "" {
@@ -186,7 +205,7 @@ func (b *Bot) inputReply(ctx context.Context, st dialogState, text string) error
 }
 
 func (b *Bot) inputSnooze(ctx context.Context, st dialogState, text string) error {
-	until, err := service.ParseWhen(text, time.Now(), b.cfg.Location)
+	until, err := service.ParseWhen(text, time.Now(), b.settings.Location())
 	if err != nil {
 		return err
 	}

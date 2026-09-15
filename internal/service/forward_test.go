@@ -46,7 +46,7 @@ const forwardTaskJSON = `{"message_type":"task","analysis":"","is_task":true,
 	"confidence":0.9,"update_task_id":0,"title":"Отправить отчёт Ивану","description":"","priority":"high",
 	"category":"task","deadline":"","reply_strategy":"none","draft_reply":""}`
 
-func newForwardTestService(t *testing.T, defaults domain.Settings, cfg TriageConfig, providers ...ai.Provider) (*TriageService, *SettingsService, *sqlite.Store, chanNotifier) {
+func newForwardTestService(t *testing.T, env map[string]string, providers ...ai.Provider) (*TriageService, *SettingsService, *sqlite.Store, chanNotifier) {
 	t.Helper()
 	ctx := context.Background()
 	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -54,16 +54,13 @@ func newForwardTestService(t *testing.T, defaults domain.Settings, cfg TriageCon
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	settings, err := NewSettingsService(ctx, newMemSettingsRepo(), defaults)
-	if err != nil {
-		t.Fatal(err)
-	}
+	settings := newTestSettings(t, newMemSettingsRepo(), env)
 	registry := ai.NewRegistry()
 	for _, p := range providers {
 		registry.Register(p)
 	}
 	n := chanNotifier{created: make(chan *domain.Task, 4)}
-	s := NewTriageService(cfg, store.Messages, store.Tasks, store.Analyses,
+	s := NewTriageService(store.Messages, store.Tasks, store.Analyses,
 		NewConnectionService(store.Connections, 1), settings, registry, n, slog.New(slog.DiscardHandler))
 	return s, settings, store, n
 }
@@ -82,7 +79,7 @@ func waitTask(t *testing.T, n chanNotifier) *domain.Task {
 func TestForwardedBatchBecomesOneTask(t *testing.T) {
 	ctx := context.Background()
 	p := &fakeProvider{reqs: make(chan ai.Request, 4), resp: forwardTaskJSON}
-	s, settings, store, n := newForwardTestService(t, defaultTestSettings(), TriageConfig{}, p)
+	s, settings, store, n := newForwardTestService(t, map[string]string{"ANTHROPIC_API_KEY": "sk-test-claude-0001"}, p)
 
 	// A paused triage must not block an explicit forward.
 	if _, err := settings.Update(ctx, func(st *domain.Settings) { st.TriagePaused = true }); err != nil {
@@ -120,23 +117,60 @@ func TestChainFallsBackToNextKey(t *testing.T) {
 	blocked := &fakeProvider{name: domain.ProviderGemini, reqs: make(chan ai.Request, 8),
 		err: &ai.Error{Provider: domain.ProviderGemini, Status: 429, Message: "quota", Retryable: true}}
 	working := &fakeProvider{name: domain.ProviderGroq, reqs: make(chan ai.Request, 8), resp: forwardTaskJSON}
-	defaults := defaultTestSettings()
-	defaults.AIChain = []domain.AIKey{
-		{Provider: domain.ProviderGemini, Key: "AIza-test-gemini-01"},
-		{Provider: domain.ProviderGroq, Key: "gsk-test-groq-0001"},
-	}
-	s, _, _, n := newForwardTestService(t, defaults, TriageConfig{MaxRetries: 3}, blocked, working)
+	s, settings, _, n := newForwardTestService(t, map[string]string{
+		"AI_PROVIDER": "gemini", "GEMINI_API_KEY": "AIza-test-gemini-01", "GROQ_API_KEY": "gsk-test-groq-0001", "AI_MAX_RETRIES": "3",
+	}, blocked, working)
 
 	s.OnForwarded(domain.Message{SenderName: "Иван", SenderID: 7, Text: "Скинь отчёт", SentAt: time.Now()})
 
 	task := waitTask(t, n)
-	if task.Provider != domain.ProviderGroq || task.Model != defaults.GroqModel {
+	groqModel := settings.Get().Groq.Model
+	if task.Provider != domain.ProviderGroq || task.Model != groqModel {
 		t.Errorf("task must be attributed to the entry that answered, got %s / %s", task.Provider, task.Model)
 	}
 	if len(blocked.reqs) != 1 {
 		t.Errorf("failed entry must be tried once before falling back, got %d calls", len(blocked.reqs))
 	}
-	if req := <-working.reqs; req.APIKey != "gsk-test-groq-0001" || req.Model != defaults.GroqModel {
+	if req := <-working.reqs; req.APIKey != "gsk-test-groq-0001" || req.Model != groqModel {
 		t.Errorf("fallback entry must get its own key and model, got key %q model %q", req.APIKey, req.Model)
+	}
+}
+
+const helpdeskTicketJSON = `{"message_type":"bug","analysis":"","is_task":true,
+	"confidence":0.8,"update_task_id":0,"title":"Не проходит оплата картой","description":"Ошибка при оплате","priority":"high",
+	"category":"bug","deadline":"","reply_strategy":"clarify","draft_reply":"Уточните, пожалуйста, номер заказа."}`
+
+func TestHelpdeskTicketUsesSupportPrompt(t *testing.T) {
+	p := &fakeProvider{reqs: make(chan ai.Request, 4), resp: helpdeskTicketJSON}
+	s, _, _, n := newForwardTestService(t, map[string]string{"ANTHROPIC_API_KEY": "sk-test-claude-0001", "HELPDESK_ABOUT": "Интернет-магазин"}, p)
+	u := &domain.HelpdeskUser{UserID: 42, Name: "Анна", Username: "anna"}
+	task, err := s.CreateHelpdeskTicket(context.Background(), u, []domain.Message{
+		{MessageID: 7, Text: "Не проходит оплата", SentAt: time.Now()},
+		{MessageID: 8, Outgoing: true, Text: "Какая ошибка?", SentAt: time.Now()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-n.created
+	req := <-p.reqs
+	if !strings.Contains(req.System, "службы поддержки") || !strings.Contains(req.System, "Интернет-магазин") ||
+		!strings.Contains(req.User, "SUPPORT: Какая ошибка?") || !strings.Contains(req.User, "Анна (@anna): Не проходит оплата") {
+		t.Errorf("support prompt expected:\n%s\n%s", req.System, req.User)
+	}
+	if !task.IsHelpdesk() || task.ChatID != 42 || task.DraftReply == "" || len(task.SourceMessageIDs) != 1 || task.SourceMessageIDs[0] != 7 {
+		t.Errorf("ticket fields: %+v", task)
+	}
+}
+
+func TestHelpdeskTicketWithoutAIStillCreated(t *testing.T) {
+	s, _, _, n := newForwardTestService(t, nil)
+	u := &domain.HelpdeskUser{UserID: 42, Name: "Анна"}
+	task, err := s.CreateHelpdeskTicket(context.Background(), u, []domain.Message{{Text: "Верните деньги за заказ 123", SentAt: time.Now()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-n.created
+	if task.Title != "Верните деньги за заказ 123" || task.Priority != domain.PriorityMedium || !task.IsHelpdesk() {
+		t.Errorf("an operator's ticket must be created even without AI: %+v", task)
 	}
 }

@@ -13,7 +13,7 @@ import (
 	"tgtriage/internal/domain"
 )
 
-// Notifier delivers triage results to the owner.
+// Notifier delivers triage results to the owner (and ticket cards to the helpdesk group).
 type Notifier interface {
 	TaskCreated(ctx context.Context, t *domain.Task)
 	TaskUpdated(ctx context.Context, t *domain.Task)
@@ -21,26 +21,9 @@ type Notifier interface {
 	ForwardFailed(ctx context.Context, rec *domain.AnalysisRecord)
 }
 
-// TriageConfig tunes the triage pipeline.
-type TriageConfig struct {
-	MaxWait         time.Duration // hard cap of debounce window for continuous streams of messages
-	ContextMessages int           // history messages sent to the LLM as context
-	Workers         int           // concurrent LLM calls
-	MaxRetries      int           // retries of a failed LLM call
-	CallTimeout     time.Duration // timeout of one LLM call
-	OwnerAbout      string        // free-form owner description for the prompt
-	Location        *time.Location
-	// NoisePrefilter skips the LLM call entirely for a batch that is unmistakably noise (a bare
-	// "спасибо"/"ок"/emoji reaction — see noisefilter.go), saving tokens and quota on the highest-
-	// volume, lowest-value traffic. Deliberately narrow: any doubt sends the batch to the model as
-	// before. Default on; set false to send every batch through the LLM unconditionally.
-	NoisePrefilter bool
-}
-
 // TriageService aggregates incoming messages (debounce), analyzes them with the LLM chain
-// and turns actionable requests into tasks.
+// and turns actionable requests into tasks. Every tunable comes from the runtime settings.
 type TriageService struct {
-	cfg      TriageConfig
 	messages domain.MessageRepository
 	tasks    domain.TaskRepository
 	analyses domain.AnalysisRepository
@@ -80,20 +63,10 @@ type batch struct {
 	ids []int64
 }
 
-func NewTriageService(cfg TriageConfig, messages domain.MessageRepository, tasks domain.TaskRepository,
-	analyses domain.AnalysisRepository, conns *ConnectionService, settings *SettingsService,
-	registry *ai.Registry, notifier Notifier, log *slog.Logger) *TriageService {
-	if cfg.Workers <= 0 {
-		cfg.Workers = 2
-	}
-	if cfg.CallTimeout <= 0 {
-		cfg.CallTimeout = 90 * time.Second
-	}
-	if cfg.Location == nil {
-		cfg.Location = time.UTC
-	}
+func NewTriageService(messages domain.MessageRepository, tasks domain.TaskRepository, analyses domain.AnalysisRepository,
+	conns *ConnectionService, settings *SettingsService, registry *ai.Registry, notifier Notifier, log *slog.Logger) *TriageService {
 	return &TriageService{
-		cfg: cfg, messages: messages, tasks: tasks, analyses: analyses, conns: conns,
+		messages: messages, tasks: tasks, analyses: analyses, conns: conns,
 		settings: settings, registry: registry, notifier: notifier, log: log.With("component", "triage"),
 		buffers:   map[chatKey]*buffer{},
 		chatLocks: map[chatKey]*sync.Mutex{},
@@ -102,10 +75,17 @@ func NewTriageService(cfg TriageConfig, messages domain.MessageRepository, tasks
 	}
 }
 
+func (s *TriageService) callTimeout() time.Duration {
+	if n := s.settings.Get().AITimeoutSec; n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return 90 * time.Second
+}
+
 // Start launches workers and re-queues messages that were not analyzed before a restart.
 func (s *TriageService) Start(ctx context.Context) error {
 	s.baseCtx = ctx
-	for range s.cfg.Workers {
+	for range max(1, s.settings.Get().AnalysisWorkers) {
 		s.wg.Add(1)
 		go s.worker(ctx)
 	}
@@ -160,7 +140,8 @@ func (s *TriageService) OnIncoming(ctx context.Context, m *domain.Message) error
 	if !inserted || st.TriagePaused {
 		return nil
 	}
-	s.add(chatKey{m.ConnectionID, m.ChatID}, m.ID, time.Duration(st.DebounceSeconds)*time.Second)
+	s.add(chatKey{m.ConnectionID, m.ChatID}, m.ID, time.Duration(st.DebounceSeconds)*time.Second,
+		time.Duration(st.DebounceMaxWaitSeconds)*time.Second)
 	return nil
 }
 
@@ -198,7 +179,7 @@ func (s *TriageService) Retry(ctx context.Context, analysisID int64) error {
 	return nil
 }
 
-func (s *TriageService) add(key chatKey, id int64, debounce time.Duration) {
+func (s *TriageService) add(key chatKey, id int64, debounce, maxWait time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -209,8 +190,8 @@ func (s *TriageService) add(key chatKey, id int64, debounce time.Duration) {
 	}
 	buf.ids = append(buf.ids, id)
 	wait := debounce
-	if s.cfg.MaxWait > 0 {
-		if remaining := s.cfg.MaxWait - now.Sub(buf.first); remaining < wait {
+	if maxWait > 0 {
+		if remaining := maxWait - now.Sub(buf.first); remaining < wait {
 			wait = max(remaining, 0)
 		}
 	}
@@ -274,6 +255,14 @@ func (s *TriageService) process(b batch) {
 	s.runDetached(log, func(ctx context.Context) error { return s.analyze(ctx, b, log) })
 }
 
+// runBudget bounds one analysis by the retry budget of the whole AI chain.
+func (s *TriageService) runBudget() time.Duration {
+	st := s.settings.Get()
+	entries := max(1, len(st.AIChain))
+	perEntry := s.callTimeout()*time.Duration(st.AIMaxRetries+1) + 30*time.Second // + backoff pauses
+	return perEntry*time.Duration(entries) + time.Minute
+}
+
 // runDetached runs one analysis bounded by the retry budget of the whole AI chain. The context is
 // detached from shutdown: an in-flight analysis is allowed to finish gracefully. Panics are logged,
 // not propagated.
@@ -283,9 +272,7 @@ func (s *TriageService) runDetached(log *slog.Logger, fn func(context.Context) e
 			log.Error("panic in triage", "panic", r)
 		}
 	}()
-	entries := max(1, len(s.settings.Get().AIChain))
-	perEntry := s.cfg.CallTimeout*time.Duration(s.cfg.MaxRetries+1) + 30*time.Second // + backoff pauses
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.baseCtx), perEntry*time.Duration(entries)+time.Minute)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.baseCtx), s.runBudget())
 	defer cancel()
 	if err := fn(ctx); err != nil {
 		log.Error("triage failed", "err", err)
@@ -306,25 +293,29 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	if len(live) == 0 {
 		return s.messages.MarkAnalyzed(ctx, b.ids, 0)
 	}
-	if s.cfg.NoisePrefilter && isHeuristicNoise(live) {
+	st := s.settings.Get()
+	if st.NoisePrefilter && isHeuristicNoise(live) {
 		return s.recordHeuristicNoise(ctx, b, live)
 	}
-
-	st := s.settings.Get()
 	if len(st.AIChain) == 0 {
 		return domain.ErrProviderUnset // messages stay unanalyzed and are picked up again on restart
 	}
 
+	helpdesk := b.key.connID == domain.HelpdeskConnectionID
+	scope, about := domain.ScopePersonal, st.OwnerAbout
 	var ownerName string
-	if conn, err := s.conns.Get(ctx, b.key.connID); err == nil {
+	if helpdesk {
+		scope, about = domain.ScopeHelpdesk, st.Helpdesk.About
+	} else if conn, err := s.conns.Get(ctx, b.key.connID); err == nil {
 		ownerName = conn.UserName
 	}
-	history, err := s.messages.History(ctx, b.key.connID, b.key.chatID, live[0].ID, s.cfg.ContextMessages)
+	history, err := s.messages.History(ctx, b.key.connID, b.key.chatID, live[0].ID, st.ContextMessages)
 	if err != nil {
 		return err
 	}
 	openTasks, _, err := s.tasks.List(ctx, domain.TaskFilter{
 		Statuses: []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed},
+		Scope:    scope,
 		ChatID:   b.key.chatID,
 		Limit:    10,
 	})
@@ -332,18 +323,20 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 		return err
 	}
 
+	loc := s.settings.Location()
 	first := live[0]
 	in := ai.TriageInput{
 		OwnerName:       ownerName,
-		OwnerAbout:      s.cfg.OwnerAbout,
+		OwnerAbout:      about,
 		Now:             time.Now(),
-		Location:        s.cfg.Location,
+		Location:        loc,
 		Sensitivity:     st.Sensitivity,
 		ContactName:     first.SenderName,
 		ContactUsername: first.SenderUsername,
 		Context:         history,
 		New:             live,
 		OpenTasks:       openTasks,
+		Helpdesk:        helpdesk,
 	}
 	req := ai.Request{System: ai.SystemPrompt(in), User: ai.UserPrompt(in), Schema: ai.AnalysisSchema()}
 
@@ -389,7 +382,7 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	}
 
 	threshold := st.Sensitivity.Threshold()
-	log.Info("triage result", "provider", rec.Provider, "model", rec.Model, "type", analysis.MessageType,
+	log.Info("triage result", "helpdesk", helpdesk, "provider", rec.Provider, "model", rec.Model, "type", analysis.MessageType,
 		"is_task", analysis.IsTask, "confidence", analysis.Confidence, "threshold", threshold,
 		"update_task_id", analysis.UpdateTaskID, "latency_ms", rec.LatencyMs)
 	if !analysis.IsTask || analysis.Confidence < threshold {
@@ -398,7 +391,7 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 
 	if analysis.UpdateTaskID > 0 {
 		t, err := s.tasks.Get(ctx, analysis.UpdateTaskID)
-		if err == nil && t.ChatID == b.key.chatID && t.Status.IsOpen() {
+		if err == nil && t.ChatID == b.key.chatID && t.IsHelpdesk() == helpdesk && t.Status.IsOpen() {
 			s.merge(t, analysis, live)
 			if err := s.tasks.Update(ctx, t); err != nil {
 				return err
@@ -424,7 +417,7 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 		Description:      analysis.Description,
 		Priority:         domain.ParsePriority(analysis.Priority),
 		Category:         domain.ParseCategory(analysis.Category),
-		Deadline:         ai.ParseDeadline(analysis.Deadline, s.cfg.Location),
+		Deadline:         ai.ParseDeadline(analysis.Deadline, loc),
 		DraftReply:       analysis.DraftReply,
 		ReplyStrategy:    analysis.ReplyStrategy,
 		Confidence:       analysis.Confidence,
@@ -441,6 +434,86 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	}
 	s.notifier.TaskCreated(ctx, t)
 	return nil
+}
+
+// CreateHelpdeskTicket turns messages an operator picked (/1, a forward, the Mini App button) into a
+// ticket. The operator already decided, so a failing LLM still yields a ticket with a plain title.
+func (s *TriageService) CreateHelpdeskTicket(ctx context.Context, u *domain.HelpdeskUser, msgs []domain.Message) (*domain.Task, error) {
+	if len(msgs) == 0 {
+		return nil, fmt.Errorf("%w: нет сообщений для тикета", domain.ErrInvalidInput)
+	}
+	st := s.settings.Get()
+	loc := s.settings.Location()
+	log := s.log.With("helpdesk_user", u.UserID, "messages", len(msgs))
+	for i := range msgs {
+		if !msgs[i].Outgoing {
+			msgs[i].SenderName, msgs[i].SenderUsername = u.Name, u.Username
+		}
+	}
+	rec := &domain.AnalysisRecord{ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, InputText: forwardedText(msgs)}
+	for _, m := range msgs {
+		if m.ID > 0 {
+			rec.MessageRowIDs = append(rec.MessageRowIDs, m.ID)
+		}
+	}
+	t := &domain.Task{
+		ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, SenderID: u.UserID,
+		SenderName: u.Name, SenderUsername: u.Username, SourceText: rec.InputText,
+		Priority: domain.PriorityMedium, Category: domain.CategoryOther, Status: domain.StatusNew,
+		Title: fallbackTitle(msgs[0].Text), Confidence: 1,
+	}
+	for _, m := range msgs {
+		if !m.Outgoing && m.MessageID > 0 {
+			t.SourceMessageIDs = append(t.SourceMessageIDs, m.MessageID)
+		}
+	}
+
+	if len(st.AIChain) > 0 {
+		in := ai.ForwardInput{OwnerAbout: st.Helpdesk.About, Now: time.Now(), Location: loc, Messages: msgs, Helpdesk: true}
+		req := ai.Request{System: ai.ForwardSystemPrompt(in), User: ai.ForwardUserPrompt(in), Schema: ai.AnalysisSchema()}
+		started := time.Now()
+		res, err := s.completeChain(ctx, st, req, log)
+		rec.LatencyMs = time.Since(started).Milliseconds()
+		rec.Provider, rec.Model = res.Provider, res.Model
+		if res.Resp != nil {
+			rec.RawResponse = res.Resp.Text
+			if res.Resp.Model != "" {
+				rec.Model = res.Resp.Model
+			}
+		}
+		if err != nil {
+			rec.Status, rec.Error = domain.AnalysisError, err.Error()
+			log.Warn("ticket analysis failed, creating a plain ticket", "err", err)
+		} else {
+			a := res.Analysis
+			rec.Status, rec.IsTask, rec.Confidence, rec.MessageType = domain.AnalysisOK, true, a.Confidence, a.MessageType
+			if a.Title != "" {
+				t.Title = a.Title
+			}
+			t.Description, t.Priority, t.Category = a.Description, domain.ParsePriority(a.Priority), domain.ParseCategory(a.Category)
+			t.Deadline = ai.ParseDeadline(a.Deadline, loc)
+			t.DraftReply, t.ReplyStrategy, t.Confidence = a.DraftReply, a.ReplyStrategy, a.Confidence
+			t.Provider, t.Model = rec.Provider, rec.Model
+		}
+		if err := s.analyses.Create(ctx, rec); err != nil {
+			return nil, err
+		}
+		t.AnalysisID = rec.ID
+	}
+	if t.Title == "" {
+		t.Title = "Обращение от " + u.Name
+	}
+	if err := s.tasks.Create(ctx, t); err != nil {
+		return nil, err
+	}
+	if rec.ID > 0 {
+		if err := s.analyses.SetTaskID(ctx, rec.ID, t.ID); err != nil {
+			log.Warn("link analysis to task", "err", err)
+		}
+	}
+	log.Info("helpdesk ticket created by operator", "task_id", t.ID, "provider", t.Provider)
+	s.notifier.TaskCreated(ctx, t)
+	return t, nil
 }
 
 // recordHeuristicNoise handles a batch that isHeuristicNoise matched — no LLM call, no tokens
@@ -501,7 +574,7 @@ func (s *TriageService) completeChain(ctx context.Context, st domain.Settings, r
 			continue
 		}
 		req.APIKey, req.Model = entry.Key, res.Model
-		resp, analysis, err := s.complete(ctx, p, req, i < len(st.AIChain)-1, log)
+		resp, analysis, err := s.complete(ctx, p, req, st.AIMaxRetries, i < len(st.AIChain)-1, log)
 		res.Resp = resp
 		if err == nil {
 			if i > 0 {
@@ -525,12 +598,13 @@ func (s *TriageService) completeChain(ctx context.Context, st domain.Settings, r
 // hasFallback, an HTTP error (quota, auth, region block, 5xx) ends the attempts right away: the
 // next chain entry is a better bet than waiting on this one. Network errors are still retried —
 // they usually hit every entry alike (proxy hiccup).
-func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Request, hasFallback bool, log *slog.Logger) (*ai.Response, *domain.Analysis, error) {
+func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Request, maxRetries int, hasFallback bool, log *slog.Logger) (*ai.Response, *domain.Analysis, error) {
 	var (
 		lastErr  error
 		lastResp *ai.Response
 	)
-	for attempt := 0; attempt <= s.cfg.MaxRetries; attempt++ {
+	timeout := s.callTimeout()
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(1<<(attempt-1)) * 2 * time.Second
 			select {
@@ -539,7 +613,7 @@ func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Requ
 			case <-time.After(delay):
 			}
 		}
-		callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
+		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		resp, err := p.Complete(callCtx, req)
 		cancel()
 		if err != nil {
@@ -564,18 +638,19 @@ func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Requ
 }
 
 func (s *TriageService) merge(t *domain.Task, a *domain.Analysis, live []domain.Message) {
+	loc := s.settings.Location()
 	addition := a.Description
 	if addition == "" {
 		addition = a.Title
 	}
 	if addition != "" {
-		stamp := time.Now().In(s.cfg.Location).Format("02.01 15:04")
+		stamp := time.Now().In(loc).Format("02.01 15:04")
 		t.Description = strings.TrimSpace(t.Description + "\n\n➕ " + stamp + ": " + addition)
 	}
 	if p := domain.ParsePriority(a.Priority); p.Rank() < t.Priority.Rank() {
 		t.Priority = p
 	}
-	if d := ai.ParseDeadline(a.Deadline, s.cfg.Location); d != nil {
+	if d := ai.ParseDeadline(a.Deadline, loc); d != nil {
 		t.Deadline = d
 	}
 	if a.DraftReply != "" {
@@ -607,9 +682,9 @@ func (s *TriageService) Probe(ctx context.Context) ([]ProbeResult, error) {
 	now := time.Now()
 	in := ai.TriageInput{
 		OwnerName:   "Владелец",
-		OwnerAbout:  s.cfg.OwnerAbout,
+		OwnerAbout:  st.OwnerAbout,
 		Now:         now,
-		Location:    s.cfg.Location,
+		Location:    s.settings.Location(),
 		Sensitivity: st.Sensitivity,
 		ContactName: "Тестовый собеседник",
 		New: []domain.Message{
@@ -636,7 +711,7 @@ func (s *TriageService) probeEntry(ctx context.Context, i int, entry domain.AIKe
 	}
 	req.APIKey, req.Model = entry.Key, model
 	started := time.Now()
-	callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, s.callTimeout())
 	defer cancel()
 	resp, err := p.Complete(callCtx, req)
 	res.Latency = time.Since(started)

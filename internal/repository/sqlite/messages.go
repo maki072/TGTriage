@@ -66,6 +66,18 @@ func (r *MessageRepo) UpdateText(ctx context.Context, connectionID string, chatI
 	return err
 }
 
+func (r *MessageRepo) Find(ctx context.Context, connectionID string, chatID int64, messageID int) (*domain.Message, error) {
+	msgs, err := r.query(ctx, `SELECT `+messageColumns+` FROM messages
+		WHERE connection_id = ? AND chat_id = ? AND message_id = ? LIMIT 1`, connectionID, chatID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	if len(msgs) == 0 {
+		return nil, domain.ErrNotFound
+	}
+	return &msgs[0], nil
+}
+
 func (r *MessageRepo) MarkDeleted(ctx context.Context, connectionID string, chatID int64, messageIDs []int) error {
 	if len(messageIDs) == 0 {
 		return nil

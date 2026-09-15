@@ -132,8 +132,10 @@ func yesNo(v bool) string {
 	return "нет"
 }
 
-func (b *Bot) fmtTime(t time.Time) string  { return t.In(b.cfg.Location).Format("02.01.2006 15:04") }
-func (b *Bot) fmtShort(t time.Time) string { return t.In(b.cfg.Location).Format("02.01 15:04") }
+func (b *Bot) fmtTime(t time.Time) string {
+	return t.In(b.settings.Location()).Format("02.01.2006 15:04")
+}
+func (b *Bot) fmtShort(t time.Time) string { return t.In(b.settings.Location()).Format("02.01 15:04") }
 
 func profileURL(username string, userID int64) string {
 	if username != "" {
@@ -164,6 +166,14 @@ func humanError(err error) string {
 		return "Текст ответа пуст"
 	case errors.Is(err, domain.ErrProviderUnset):
 		return "Не задан ни один API-ключ AI — добавьте в веб-панели (Настройки)"
+	case errors.Is(err, domain.ErrHelpdeskOff):
+		return "Хелпдеск выключен или не указана группа"
+	case errors.Is(err, domain.ErrUserBlocked):
+		return "Пользователь заблокировал бота — сообщение не доставлено"
+	case errors.Is(err, domain.ErrTopicGone):
+		return "Тема в группе удалена"
+	case errors.Is(err, domain.ErrForbidden):
+		return "Нет доступа"
 	case errors.As(err, &apiErr):
 		return "Telegram: " + apiErr.Description
 	case errors.As(err, &aiErr):

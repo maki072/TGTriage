@@ -19,20 +19,24 @@ var staticFS embed.FS
 
 // Config configures the Mini App HTTP server.
 type Config struct {
-	Addr              string // listen address, e.g. ":8080"
-	BotToken          string // used to validate Telegram initData
-	OwnerID           int64
-	Location          *time.Location
-	ClaudePresets     []string
-	GeminiPresets     []string
-	GroqPresets       []string
-	MistralPresets    []string
-	OpenRouterPresets []string
+	Addr     string // listen address, e.g. ":8080"
+	BotToken string // used to validate Telegram initData
+	OwnerID  int64
 	// DevInsecure allows requests without a valid Telegram initData when they originate from
 	// a private/loopback address — lets you open the Mini App straight from a LAN browser
-	// before a public HTTPS domain (Cloudflare Tunnel or a reverse proxy) is wired up. Every
-	// such request is logged at WARN. Never enable this on an internet-reachable deployment.
+	// before a public HTTPS domain is wired up. Every such request is logged at WARN. Never
+	// enable this on an internet-reachable deployment.
 	DevInsecure bool
+}
+
+// Deps are the use cases the Mini App works with.
+type Deps struct {
+	Tasks    *service.TaskService
+	Settings *service.SettingsService
+	Triage   *service.TriageService
+	Helpdesk *service.HelpdeskService
+	Backups  *service.BackupService
+	Restart  func() // stops the service gracefully; systemd starts it again
 }
 
 // Server is the Mini App HTTP delivery layer.
@@ -40,24 +44,23 @@ type Server struct {
 	cfg      Config
 	tasks    *service.TaskService
 	settings *service.SettingsService
-	conns    *service.ConnectionService
 	triage   *service.TriageService
+	helpdesk *service.HelpdeskService
+	backups  *service.BackupService
+	restart  func()
 	log      *slog.Logger
 	http     *http.Server
 }
 
-func New(cfg Config, tasks *service.TaskService, settings *service.SettingsService, conns *service.ConnectionService,
-	triage *service.TriageService, log *slog.Logger) *Server {
-	if cfg.Location == nil {
-		cfg.Location = time.UTC
-	}
-	s := &Server{cfg: cfg, tasks: tasks, settings: settings, conns: conns, triage: triage, log: log.With("component", "webapp")}
+func New(cfg Config, deps Deps, log *slog.Logger) *Server {
+	s := &Server{cfg: cfg, tasks: deps.Tasks, settings: deps.Settings, triage: deps.Triage, helpdesk: deps.Helpdesk,
+		backups: deps.Backups, restart: deps.Restart, log: log.With("component", "webapp")}
 	s.http = &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      4 * time.Minute, // AI key probe and backups take a while
 		IdleTimeout:       120 * time.Second,
 	}
 	return s
@@ -91,6 +94,7 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	api := http.NewServeMux()
+	api.HandleFunc("GET /api/me", s.handleMe)
 	api.HandleFunc("GET /api/overview", s.handleOverview)
 	api.HandleFunc("GET /api/tasks", s.handleTaskList)
 	api.HandleFunc("GET /api/tasks/{id}", s.handleTaskGet)
@@ -99,12 +103,23 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /api/tasks/{id}/snooze", s.handleTaskSnooze)
 	api.HandleFunc("POST /api/tasks/{id}/draft", s.handleTaskDraft)
 	api.HandleFunc("POST /api/tasks/{id}/reply", s.handleTaskReply)
-	api.HandleFunc("GET /api/digest", s.handleDigest)
-	api.HandleFunc("GET /api/stats", s.handleStats)
-	api.HandleFunc("GET /api/settings", s.handleSettingsGet)
-	api.HandleFunc("POST /api/settings", s.handleSettingsPatch)
-	api.HandleFunc("POST /api/settings/reset", s.handleSettingsReset)
-	api.HandleFunc("POST /api/provider/test", s.handleProviderTest)
+
+	api.HandleFunc("GET /api/helpdesk/users", s.handleHDUsers)
+	api.HandleFunc("GET /api/helpdesk/users/{id}", s.handleHDUser)
+	api.HandleFunc("POST /api/helpdesk/users/{id}/reply", s.handleHDReply)
+	api.HandleFunc("POST /api/helpdesk/users/{id}/topic", s.handleHDTopic)
+	api.HandleFunc("POST /api/helpdesk/users/{id}/ticket", s.handleHDTicket)
+
+	api.Handle("GET /api/digest", s.ownerOnly(s.handleDigest))
+	api.Handle("GET /api/stats", s.ownerOnly(s.handleStats))
+	api.Handle("GET /api/settings", s.ownerOnly(s.handleSettingsGet))
+	api.Handle("POST /api/settings", s.ownerOnly(s.handleSettingsPatch))
+	api.Handle("POST /api/settings/reset", s.ownerOnly(s.handleSettingsReset))
+	api.Handle("POST /api/provider/test", s.ownerOnly(s.handleProviderTest))
+	api.Handle("POST /api/helpdesk/check", s.ownerOnly(s.handleHDCheck))
+	api.Handle("GET /api/backups", s.ownerOnly(s.handleBackupList))
+	api.Handle("POST /api/backups", s.ownerOnly(s.handleBackupRun))
+	api.Handle("POST /api/system/restart", s.ownerOnly(s.handleRestart))
 	mux.Handle("/api/", s.recover(s.auth(api)))
 
 	sub, err := fs.Sub(staticFS, "static")
@@ -140,9 +155,35 @@ func (s *Server) recover(next http.Handler) http.Handler {
 	})
 }
 
-// auth validates the Telegram Mini App launch data and restricts access to the configured owner.
+const (
+	roleOwner    = "owner"
+	roleOperator = "operator"
+)
+
+type principal struct {
+	ID   int64
+	Name string
+	Role string
+}
+
+type principalKey struct{}
+
+func principalFrom(r *http.Request) principal {
+	p, _ := r.Context().Value(principalKey{}).(principal)
+	return p
+}
+
+func (p principal) isOwner() bool { return p.Role == roleOwner }
+
+// auth validates the Telegram Mini App launch data: the owner gets full access, members of the
+// helpdesk group get the operator role.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serve := func(p principal) {
+			ctx := context.WithValue(r.Context(), principalKey{}, p)
+			ctx = service.WithActor(ctx, service.Actor{ID: p.ID, Name: p.Name})
+			next.ServeHTTP(w, r.WithContext(ctx))
+		}
 		initData := extractInitData(r)
 		if initData != "" {
 			userID, ok := validateInitData(s.cfg.BotToken, initData)
@@ -150,19 +191,33 @@ func (s *Server) auth(next http.Handler) http.Handler {
 				writeError(w, http.StatusUnauthorized, "invalid Telegram init data")
 				return
 			}
+			p := principal{ID: userID, Name: initDataUserName(initData), Role: roleOwner}
 			if userID != s.cfg.OwnerID {
-				writeError(w, http.StatusForbidden, "not the bot owner")
-				return
+				if !s.helpdesk.IsOperator(r.Context(), userID) {
+					writeError(w, http.StatusForbidden, "нет доступа: вы не владелец и не оператор хелпдеска")
+					return
+				}
+				p.Role = roleOperator
 			}
-			next.ServeHTTP(w, r)
+			serve(p)
 			return
 		}
 		if s.cfg.DevInsecure && isPrivateAddr(r.RemoteAddr) {
 			s.log.Warn("webapp request without Telegram auth allowed via DevInsecure", "remote", r.RemoteAddr, "path", r.URL.Path)
-			next.ServeHTTP(w, r)
+			serve(principal{ID: s.cfg.OwnerID, Name: "dev", Role: roleOwner})
 			return
 		}
 		writeError(w, http.StatusUnauthorized, "missing Telegram init data")
+	})
+}
+
+func (s *Server) ownerOnly(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !principalFrom(r).isOwner() {
+			writeError(w, http.StatusForbidden, "доступно только владельцу")
+			return
+		}
+		h(w, r)
 	})
 }
 

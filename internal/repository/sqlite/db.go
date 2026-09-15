@@ -21,6 +21,7 @@ type Store struct {
 	Analyses    *AnalysisRepo
 	Settings    *SettingsRepo
 	Connections *ConnectionRepo
+	Helpdesk    *HelpdeskRepo
 }
 
 // Open opens (and creates if needed) the database, applies pragmas and migrations.
@@ -59,6 +60,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		Analyses:    &AnalysisRepo{db: db},
 		Settings:    &SettingsRepo{db: db},
 		Connections: &ConnectionRepo{db: db},
+		Helpdesk:    &HelpdeskRepo{db: db},
 	}, nil
 }
 
@@ -159,6 +161,56 @@ var migrations = [][]string{
 			updated_at INTEGER NOT NULL
 		)`,
 	},
+	// v2: support desk
+	{
+		`CREATE TABLE hd_users (
+			user_id         INTEGER PRIMARY KEY,
+			name            TEXT NOT NULL DEFAULT '',
+			username        TEXT NOT NULL DEFAULT '',
+			language_code   TEXT NOT NULL DEFAULT '',
+			source          TEXT NOT NULL DEFAULT '',
+			group_id        INTEGER NOT NULL DEFAULT 0,
+			topic_id        INTEGER NOT NULL DEFAULT 0,
+			topic_closed    INTEGER NOT NULL DEFAULT 0,
+			blocked         INTEGER NOT NULL DEFAULT 0,
+			awaiting_since  INTEGER NOT NULL DEFAULT 0,
+			reminded_at     INTEGER NOT NULL DEFAULT 0,
+			last_message_at INTEGER NOT NULL DEFAULT 0,
+			created_at      INTEGER NOT NULL,
+			updated_at      INTEGER NOT NULL
+		)`,
+		`CREATE INDEX idx_hd_users_topic ON hd_users (group_id, topic_id)`,
+		`CREATE INDEX idx_hd_users_awaiting ON hd_users (awaiting_since)`,
+		`CREATE TABLE hd_messages (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id      INTEGER NOT NULL,
+			direction    TEXT NOT NULL,
+			user_msg_id  INTEGER NOT NULL DEFAULT 0,
+			group_id     INTEGER NOT NULL DEFAULT 0,
+			group_msg_id INTEGER NOT NULL DEFAULT 0,
+			operator_id  INTEGER NOT NULL DEFAULT 0,
+			created_at   INTEGER NOT NULL
+		)`,
+		`CREATE INDEX idx_hd_messages_user ON hd_messages (user_id, user_msg_id)`,
+		`CREATE INDEX idx_hd_messages_group ON hd_messages (group_id, group_msg_id)`,
+		`CREATE INDEX idx_hd_messages_created ON hd_messages (group_id, created_at)`,
+		`CREATE TABLE hd_cards (
+			task_id    INTEGER NOT NULL,
+			chat_id    INTEGER NOT NULL,
+			topic_id   INTEGER NOT NULL DEFAULT 0,
+			message_id INTEGER NOT NULL,
+			PRIMARY KEY (task_id, chat_id, message_id)
+		)`,
+		`CREATE INDEX idx_tasks_connection ON tasks (connection_id, status)`,
+	},
+}
+
+// Backup writes a consistent, compacted copy of the database to path (which must not exist).
+func (s *Store) Backup(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("vacuum into: %w", err)
+	}
+	return nil
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

@@ -151,11 +151,33 @@ func (t *Task) IsOverdue(now time.Time) bool {
 	return t.Deadline != nil && t.Status.IsOpen() && t.Deadline.Before(now)
 }
 
+// IsHelpdesk reports whether the task is a support desk ticket.
+func (t *Task) IsHelpdesk() bool { return t.ConnectionID == HelpdeskConnectionID }
+
+// TaskScope narrows tasks to support desk tickets or the owner's personal tasks.
+type TaskScope string
+
+const (
+	ScopeAll      TaskScope = ""
+	ScopeHelpdesk TaskScope = "helpdesk"
+	ScopePersonal TaskScope = "personal"
+)
+
+// ParseTaskScope normalizes a scope name; unknown values mean all tasks.
+func ParseTaskScope(s string) TaskScope {
+	switch TaskScope(s) {
+	case ScopeHelpdesk, ScopePersonal:
+		return TaskScope(s)
+	}
+	return ScopeAll
+}
+
 // TaskFilter selects tasks for listing.
 type TaskFilter struct {
 	Statuses   []TaskStatus // empty = any
 	Priorities []Priority   // empty = any
-	ChatID     int64        // 0 = any
+	Scope      TaskScope
+	ChatID     int64 // 0 = any
 	Limit      int
 	Offset     int
 }

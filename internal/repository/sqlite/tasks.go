@@ -129,6 +129,10 @@ func (r *TaskRepo) List(ctx context.Context, f domain.TaskFilter) ([]domain.Task
 			args = append(args, string(p))
 		}
 	}
+	if c, a := scopeCond(f.Scope); c != "" {
+		where = append(where, c)
+		args = append(args, a...)
+	}
 	if f.ChatID != 0 {
 		where = append(where, "chat_id = ?")
 		args = append(args, f.ChatID)
@@ -199,8 +203,28 @@ func (r *TaskRepo) DueSnoozed(ctx context.Context, now time.Time) ([]domain.Task
 	return out, rows.Err()
 }
 
-func (r *TaskRepo) CountByStatus(ctx context.Context, since time.Time) (map[domain.TaskStatus]int, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM tasks WHERE created_at >= ? GROUP BY status`, toUnix(since))
+// scopeCond returns the SQL condition (with args) selecting tasks of a scope; empty for all tasks.
+func scopeCond(scope domain.TaskScope) (string, []any) {
+	switch scope {
+	case domain.ScopeHelpdesk:
+		return "connection_id = ?", []any{domain.HelpdeskConnectionID}
+	case domain.ScopePersonal:
+		return "connection_id <> ?", []any{domain.HelpdeskConnectionID}
+	}
+	return "", nil
+}
+
+func andScope(scope domain.TaskScope, args []any) (string, []any) {
+	c, a := scopeCond(scope)
+	if c == "" {
+		return "", args
+	}
+	return " AND " + c, append(args, a...)
+}
+
+func (r *TaskRepo) CountByStatus(ctx context.Context, scope domain.TaskScope, since time.Time) (map[domain.TaskStatus]int, error) {
+	cond, args := andScope(scope, []any{toUnix(since)})
+	rows, err := r.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM tasks WHERE created_at >= ?`+cond+` GROUP BY status`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("count by status: %w", err)
 	}
@@ -219,10 +243,10 @@ func (r *TaskRepo) CountByStatus(ctx context.Context, since time.Time) (map[doma
 	return out, rows.Err()
 }
 
-func (r *TaskRepo) CountOverdue(ctx context.Context, now time.Time) (int, error) {
+func (r *TaskRepo) CountOverdue(ctx context.Context, scope domain.TaskScope, now time.Time) (int, error) {
 	var n int
+	cond, args := andScope(scope, []any{string(domain.StatusNew), string(domain.StatusInProgress), now.Unix()})
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks
-		WHERE status IN (?, ?) AND deadline > 0 AND deadline < ?`,
-		string(domain.StatusNew), string(domain.StatusInProgress), now.Unix()).Scan(&n)
+		WHERE status IN (?, ?) AND deadline > 0 AND deadline < ?`+cond, args...).Scan(&n)
 	return n, err
 }

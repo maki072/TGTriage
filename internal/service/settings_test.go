@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"tgtriage/internal/domain"
@@ -47,66 +48,69 @@ func (r *memSettingsRepo) DeleteExceptPrefix(_ context.Context, keep string) err
 
 var _ domain.SettingsRepository = (*memSettingsRepo)(nil)
 
-func defaultTestSettings() domain.Settings {
-	return domain.Settings{
-		AIChain:         []domain.AIKey{{Provider: domain.ProviderClaude, Key: "sk-test-claude-0001"}},
-		ClaudeModel:     "claude-opus-5",
-		GeminiModel:     "gemini-3.6-flash",
-		GroqModel:       "openai/gpt-oss-120b",
-		MistralModel:    "mistral-small-latest",
-		OpenRouterModel: "openai/gpt-oss-20b:free",
-		DebounceSeconds: 20,
-		Sensitivity:     domain.SensitivityMedium,
-		DigestEnabled:   true,
-		DigestTime:      "09:00",
-		MarkReadOnWork:  true,
+func envOf(m map[string]string) EnvLookup {
+	return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+}
+
+func newTestSettings(t *testing.T, repo *memSettingsRepo, env map[string]string) *SettingsService {
+	t.Helper()
+	svc, err := NewSettingsService(context.Background(), repo, envOf(env), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc
+}
+
+func TestDefaultsAreValid(t *testing.T) {
+	st := DefaultSettings()
+	if err := validate(&st); err != nil {
+		t.Fatalf("built-in defaults must pass validation: %v", err)
+	}
+	if st.DebounceSeconds != 20 || st.Timezone != "Europe/Moscow" || len(st.Claude.Presets) == 0 || st.Helpdesk.Enabled {
+		t.Errorf("unexpected defaults: %+v", st)
 	}
 }
 
-// TestUpdateWritesOnlyChangedFields is a regression test: a single-field change must not
-// freeze every other field in the DB, or later env-file edits to those fields stop applying.
+// TestEnvImportedOnceThenDBWins: legacy env variables seed the DB, after which the DB is the source of
+// truth and the .env can be trimmed down to bootstrap variables.
+func TestEnvImportedOnceThenDBWins(t *testing.T) {
+	repo := newMemSettingsRepo()
+	svc := newTestSettings(t, repo, map[string]string{
+		"DEBOUNCE_SECONDS": "45", "ANTHROPIC_API_KEY": "sk-test-claude-0001", "AI_TIMEOUT": "45s", "SENSITIVITY": "bogus",
+	})
+	st := svc.Get()
+	if st.DebounceSeconds != 45 || st.AITimeoutSec != 45 || len(st.AIChain) != 1 {
+		t.Fatalf("env not imported: %+v", st)
+	}
+	if st.Sensitivity != domain.SensitivityMedium {
+		t.Errorf("invalid env value must be ignored, got %q", st.Sensitivity)
+	}
+	if repo.data["triage.debounce_seconds"] != "45" || repo.data[keyChain] == "" {
+		t.Errorf("imported values must be persisted: %v", repo.data)
+	}
+
+	svc2 := newTestSettings(t, repo, map[string]string{"DEBOUNCE_SECONDS": "10"}) // env edited, keys removed
+	if got := svc2.Get(); got.DebounceSeconds != 45 || len(got.AIChain) != 1 {
+		t.Errorf("DB values must win over later env edits: %+v", got)
+	}
+}
+
 func TestUpdateWritesOnlyChangedFields(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	svc := newTestSettings(t, repo, nil)
 	if _, err := svc.Update(ctx, func(s *domain.Settings) { s.DebounceSeconds = 45 }); err != nil {
 		t.Fatal(err)
 	}
-	if len(repo.data) != 1 {
-		t.Fatalf("expected exactly 1 persisted key after a single-field change, got %d: %v", len(repo.data), repo.data)
-	}
-	if repo.data[keyDebounce] != "45" {
-		t.Errorf("debounce not persisted: %v", repo.data)
-	}
-
-	// Simulate redeploying with a new env default for a field the user never touched in the bot.
-	newDefaults := defaultTestSettings()
-	newDefaults.GeminiModel = "gemini-3.8-flash"
-	svc2, err := NewSettingsService(ctx, repo, newDefaults)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := svc2.Get()
-	if got.GeminiModel != "gemini-3.8-flash" {
-		t.Errorf("untouched field must keep following the .env default, got %q", got.GeminiModel)
-	}
-	if got.DebounceSeconds != 45 {
-		t.Errorf("field changed via Update must survive redeploy, got %d", got.DebounceSeconds)
+	if len(repo.data) != 1 || repo.data["triage.debounce_seconds"] != "45" {
+		t.Fatalf("expected exactly the changed key persisted, got %v", repo.data)
 	}
 }
 
 func TestUpdateNoopWritesNothing(t *testing.T) {
-	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.Update(ctx, func(*domain.Settings) {}); err != nil {
+	svc := newTestSettings(t, repo, nil)
+	if _, err := svc.Update(context.Background(), func(*domain.Settings) {}); err != nil {
 		t.Fatal(err)
 	}
 	if len(repo.data) != 0 {
@@ -115,14 +119,9 @@ func TestUpdateNoopWritesNothing(t *testing.T) {
 }
 
 func TestUpdateRejectsInvalidAndKeepsCurrent(t *testing.T) {
-	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = svc.Update(ctx, func(s *domain.Settings) { s.DebounceSeconds = -1 })
-	if err == nil {
+	svc := newTestSettings(t, repo, nil)
+	if _, err := svc.Update(context.Background(), func(s *domain.Settings) { s.DebounceSeconds = -1 }); err == nil {
 		t.Fatal("expected validation error")
 	}
 	if got := svc.Get().DebounceSeconds; got != 20 {
@@ -133,24 +132,21 @@ func TestUpdateRejectsInvalidAndKeepsCurrent(t *testing.T) {
 	}
 }
 
-func TestResetDropsOverridesButKeepsMeta(t *testing.T) {
+func TestResetReimportsEnvAndKeepsMeta(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
-	if err != nil {
-		t.Fatal(err)
-	}
+	svc := newTestSettings(t, repo, map[string]string{"DEBOUNCE_SECONDS": "30"})
 	if err := svc.SetMeta(ctx, "last_digest", "2026-09-14"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Update(ctx, func(s *domain.Settings) { s.DebounceSeconds = 99 }); err != nil {
+	if _, err := svc.Update(ctx, func(s *domain.Settings) { s.DebounceSeconds = 99; s.DigestTime = "07:00" }); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.Reset(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.Get().DebounceSeconds; got != 20 {
-		t.Errorf("reset must restore the .env default, got %d", got)
+	if got := svc.Get(); got.DebounceSeconds != 30 || got.DigestTime != "09:00" {
+		t.Errorf("reset must restore env values and defaults, got debounce=%d digest=%s", got.DebounceSeconds, got.DigestTime)
 	}
 	if v, err := svc.Meta(ctx, "last_digest"); err != nil || v != "2026-09-14" {
 		t.Errorf("reset must keep meta.* keys, got %q err=%v", v, err)
@@ -158,15 +154,11 @@ func TestResetDropsOverridesButKeepsMeta(t *testing.T) {
 }
 
 func TestLegacyProviderOverridePromotesItsKeys(t *testing.T) {
-	ctx := context.Background()
 	repo := newMemSettingsRepo()
 	repo.data[keyLegacyProvider] = domain.ProviderGemini
-	defaults := defaultTestSettings()
-	defaults.AIChain = append(defaults.AIChain, domain.AIKey{Provider: domain.ProviderGemini, Key: "AIza-test-gemini-01"})
-	svc, err := NewSettingsService(ctx, repo, defaults)
-	if err != nil {
-		t.Fatal(err)
-	}
+	svc := newTestSettings(t, repo, map[string]string{
+		"ANTHROPIC_API_KEY": "sk-test-claude-0001", "GEMINI_API_KEY": "AIza-test-gemini-01",
+	})
 	if p, _ := svc.Get().Primary(); p.Provider != domain.ProviderGemini {
 		t.Errorf("provider chosen before the chain existed must stay first, got chain %+v", svc.Get().AIChain)
 	}
@@ -175,10 +167,7 @@ func TestLegacyProviderOverridePromotesItsKeys(t *testing.T) {
 func TestChainPersistsAndSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemSettingsRepo()
-	svc, err := NewSettingsService(ctx, repo, defaultTestSettings())
-	if err != nil {
-		t.Fatal(err)
-	}
+	svc := newTestSettings(t, repo, nil)
 	chain := []domain.AIKey{
 		{Provider: " Groq ", Key: " gsk-test-groq-0001 "},
 		{Provider: domain.ProviderClaude, Key: "sk-test-claude-0001"},
@@ -189,11 +178,7 @@ func TestChainPersistsAndSurvivesRestart(t *testing.T) {
 	if chain[0].Key != " gsk-test-groq-0001 " {
 		t.Error("Update must not mutate the caller's slice")
 	}
-	svc2, err := NewSettingsService(ctx, repo, defaultTestSettings())
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := svc2.Get().AIChain
+	got := newTestSettings(t, repo, nil).Get().AIChain
 	if len(got) != 2 || got[0] != (domain.AIKey{Provider: domain.ProviderGroq, Key: "gsk-test-groq-0001"}) {
 		t.Errorf("saved chain must be normalized and reloaded as is, got %+v", got)
 	}
@@ -201,10 +186,7 @@ func TestChainPersistsAndSurvivesRestart(t *testing.T) {
 
 func TestUpdateRejectsInvalidChain(t *testing.T) {
 	ctx := context.Background()
-	svc, err := NewSettingsService(ctx, newMemSettingsRepo(), defaultTestSettings())
-	if err != nil {
-		t.Fatal(err)
-	}
+	svc := newTestSettings(t, newMemSettingsRepo(), nil)
 	for name, chain := range map[string][]domain.AIKey{
 		"unknown provider": {{Provider: "openai", Key: "sk-test-0000000001"}},
 		"empty key":        {{Provider: domain.ProviderGemini, Key: "  "}},
@@ -216,5 +198,43 @@ func TestUpdateRejectsInvalidChain(t *testing.T) {
 	}
 	if _, err := svc.Update(ctx, func(s *domain.Settings) { s.AIChain = nil }); err != nil {
 		t.Errorf("an empty chain must be allowed: %v", err)
+	}
+}
+
+func TestUpdateFieldsJSON(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestSettings(t, newMemSettingsRepo(), nil)
+	raw := func(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
+
+	st, err := svc.UpdateFields(ctx, map[string]json.RawMessage{
+		"helpdesk.enabled":    raw(true),
+		"helpdesk.group_id":   raw(int64(-1001234567890)),
+		"helpdesk.hours_days": raw("531"),
+		"ai.claude_presets":   raw([]string{"claude-opus-5", " claude-haiku-4-5 "}),
+		"general.timezone":    raw("Asia/Yekaterinburg"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Helpdesk.Active() || st.Helpdesk.HoursDays != "135" || len(st.Claude.Presets) != 2 || st.Claude.Presets[1] != "claude-haiku-4-5" {
+		t.Errorf("fields not applied: %+v", st.Helpdesk)
+	}
+	if svc.Location().String() != "Asia/Yekaterinburg" {
+		t.Errorf("location must follow the timezone setting, got %s", svc.Location())
+	}
+
+	for name, values := range map[string]map[string]json.RawMessage{
+		"positive group id": {"helpdesk.group_id": raw(5)},
+		"bad timezone":      {"general.timezone": raw("Mars/Base")},
+		"unknown key":       {"nope": raw(1)},
+		"http public url":   {"webapp.public_url": raw("http://example.com")},
+		"type mismatch":     {"helpdesk.enabled": raw("yes")},
+	} {
+		if _, err := svc.UpdateFields(ctx, values); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	if got := svc.Get().Helpdesk.GroupID; got != -1001234567890 {
+		t.Errorf("failed update must keep previous values, got %d", got)
 	}
 }
