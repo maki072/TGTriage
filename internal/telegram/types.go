@@ -201,6 +201,7 @@ type Message struct {
 	ForumTopicClosed     *struct{}       `json:"forum_topic_closed,omitempty"`
 	ForumTopicReopened   *struct{}       `json:"forum_topic_reopened,omitempty"`
 	ForumTopicEdited     *struct{}       `json:"forum_topic_edited,omitempty"`
+	MigrateToChatID      int64           `json:"migrate_to_chat_id,omitempty"` // a group became a supergroup
 	Photo                []Media         `json:"photo,omitempty"`
 	Video                *Media          `json:"video,omitempty"`
 	VideoNote            *Media          `json:"video_note,omitempty"`

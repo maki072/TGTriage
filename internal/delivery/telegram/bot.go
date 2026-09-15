@@ -105,6 +105,9 @@ func (b *Bot) handle(ctx context.Context, u telegram.Update) {
 
 func (b *Bot) onMessage(ctx context.Context, m *telegram.Message) {
 	switch {
+	case m.MigrateToChatID != 0:
+		// enabling topics turns a basic group into a supergroup with a new id
+		b.offerHelpdeskGroup(ctx, m.MigrateToChatID, m.From)
 	case m.Chat.Type == "private":
 		b.onPrivateMessage(ctx, m)
 	case m.Chat.ID != 0 && m.Chat.ID == b.helpdesk.GroupID():

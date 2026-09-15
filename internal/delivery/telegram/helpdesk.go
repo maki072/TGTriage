@@ -229,7 +229,84 @@ func (b *Bot) onMyChatMember(ctx context.Context, u *telegram.ChatMemberUpdated)
 		} else if u.NewChatMember.Status == "member" {
 			_ = b.sendText(ctx, "⚠️ Бот в группе хелпдеска не администратор — назначьте его админом с правом «Управление темами».", nil)
 		}
+	case u.Chat.Type == "group" || u.Chat.Type == "supergroup":
+		if u.NewChatMember.InChat() && u.NewChatMember.Status != u.OldChatMember.Status {
+			b.offerHelpdeskGroup(ctx, u.Chat.ID, &u.From)
+		}
 	}
+}
+
+// offerHelpdeskGroup tells the owner the id of a group the bot was added to (or promoted in) and offers
+// to use it for the helpdesk. Only the owner can press the button, so a stranger adding the bot to
+// some group changes nothing.
+func (b *Bot) offerHelpdeskGroup(ctx context.Context, chatID int64, by *telegram.User) {
+	chat := telegram.Chat{ID: chatID}
+	if ch, err := b.api.GetChat(ctx, chatID); err == nil {
+		chat = *ch
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "👥 <b>Бот в группе «%s»</b>\nID: <code>%d</code>", esc(chat.Title), chat.ID)
+	if by != nil && by.ID != 0 && !by.IsBot {
+		fmt.Fprintf(&sb, "\nДобавил: %s", esc(by.FullName()))
+	}
+	if chat.Type == "group" {
+		sb.WriteString("\n\n⚠️ Это обычная группа. Включите в ней «Темы» — Telegram превратит её в супергруппу с новым ID, и я пришлю его сюда.")
+		_ = b.sendText(ctx, sb.String(), nil)
+		return
+	}
+	if chat.ID == b.settings.Get().Helpdesk.GroupID {
+		return
+	}
+	if !chat.IsForum {
+		sb.WriteString("\n\n⚠️ В группе выключены «Темы» — включите их в настройках группы.")
+	}
+	if m, err := b.api.GetChatMember(ctx, chat.ID, b.cfg.BotID); err == nil && m.Status != "administrator" {
+		sb.WriteString("\n⚠️ Бот не администратор — назначьте его админом с правами «Управление темами», «Закреплять» и «Удалять сообщения».")
+	}
+	markup := kb(row(cb("🎧 Использовать для хелпдеска", fmt.Sprintf("hg:%d", chat.ID))))
+	if err := b.sendText(ctx, sb.String(), markup); err != nil {
+		b.log.Warn("offer helpdesk group", "chat_id", chat.ID, "err", err)
+	}
+}
+
+// useHelpdeskGroup sets the group for the helpdesk, enables it and reports the group check.
+func (b *Bot) useHelpdeskGroup(ctx context.Context, ref *msgRef, groupID int64, answer func(string, bool)) error {
+	if groupID >= 0 {
+		return domain.ErrInvalidInput
+	}
+	if _, err := b.settings.Update(ctx, func(s *domain.Settings) {
+		s.Helpdesk.GroupID, s.Helpdesk.Enabled = groupID, true
+	}); err != nil {
+		return err
+	}
+	answer("🎧 Хелпдеск включён", false)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "🎧 <b>Хелпдеск включён</b>\nГруппа: <code>%d</code>\n\n", groupID)
+	check, err := b.helpdesk.CheckGroup(ctx)
+	if err != nil {
+		fmt.Fprintf(&sb, "❌ Не удалось проверить группу: %s", esc(humanError(err)))
+	} else {
+		line := func(ok bool, text string) {
+			mark := "✅"
+			if !ok {
+				mark = "❌"
+			}
+			fmt.Fprintf(&sb, "%s %s\n", mark, text)
+		}
+		line(true, "Группа: "+esc(check.Title))
+		line(check.IsForum, "Темы включены")
+		line(check.BotAdmin, "Бот — администратор")
+		line(check.CanManageTopics, "Право «Управление темами»")
+		line(check.CanPinMessages, "Право закреплять сообщения")
+		line(check.CanDeleteMessages, "Право удалять сообщения")
+		if check.IsForum && check.CanManageTopics {
+			sb.WriteString("\nГотово: напишите боту с другого аккаунта — появится тема.")
+		} else {
+			sb.WriteString("\nИсправьте отмеченное ❌ — без тем и права «Управление темами» хелпдеск не работает.")
+		}
+	}
+	markup := b.webAppKeyboard("⚙️ Настройки хелпдеска", "")
+	return b.render(ctx, ref, sb.String(), markup)
 }
 
 // ---------- ticket cards ----------

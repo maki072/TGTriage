@@ -191,6 +191,8 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 		}
 		answer("🔁 Анализ поставлен в очередь", false)
 		return b.render(ctx, ref, "🔁 Повторный анализ запущен — результат придёт отдельным сообщением.", nil)
+	case "hg":
+		return b.useHelpdeskGroup(ctx, ref, num(1), answer)
 	case "cx":
 		b.states.clear()
 		answer("Отменено", false)
