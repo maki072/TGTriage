@@ -46,6 +46,9 @@ type Task struct {
 	Confidence     float64       `json:"confidence"`
 	Provider       string        `json:"provider"`
 	Model          string        `json:"model"`
+	Importance     string        `json:"importance"`
+	RemindAt       *string       `json:"remind_at"`
+	MergedInto     int64         `json:"merged_into,omitempty"`
 	CreatedAt      string        `json:"created_at"`
 	UpdatedAt      string        `json:"updated_at"`
 	ClosedAt       *string       `json:"closed_at"`
@@ -90,6 +93,9 @@ func toTaskDTO(t domain.Task, loc *time.Location) Task {
 		Confidence:    t.Confidence,
 		Provider:      t.Provider,
 		Model:         t.Model,
+		Importance:    string(t.Importance),
+		RemindAt:      fmtTimePtr(t.RemindAt, loc),
+		MergedInto:    t.MergedInto,
 		CreatedAt:     fmtTime(t.CreatedAt, loc),
 		UpdatedAt:     fmtTime(t.UpdatedAt, loc),
 		ClosedAt:      fmtTimePtr(t.ClosedAt, loc),

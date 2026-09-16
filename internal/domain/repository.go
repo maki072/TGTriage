@@ -29,6 +29,11 @@ type TaskRepository interface {
 	Get(ctx context.Context, id int64) (*Task, error)
 	List(ctx context.Context, f TaskFilter) ([]Task, int, error)
 	DueSnoozed(ctx context.Context, now time.Time) ([]Task, error)
+	// DueRemind returns open tasks whose custom reminder (RemindAt) has come.
+	DueRemind(ctx context.Context, now time.Time) ([]Task, error)
+	// DuePersonalNudge returns open personal-chat tasks due for a repeated reminder: tasks whose
+	// last reminder (or creation, if never reminded) is at or before cutoff.
+	DuePersonalNudge(ctx context.Context, cutoff time.Time) ([]Task, error)
 	CountByStatus(ctx context.Context, scope TaskScope, since time.Time) (map[TaskStatus]int, error)
 	CountOverdue(ctx context.Context, scope TaskScope, now time.Time) (int, error)
 }

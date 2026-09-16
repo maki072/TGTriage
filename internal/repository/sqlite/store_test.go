@@ -108,6 +108,67 @@ func TestTasksListAndSnooze(t *testing.T) {
 	}
 }
 
+func TestTasksReminders(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	personal := &domain.Task{ConnectionID: "c1", ChatID: 42, SenderID: 42, Title: "personal", Priority: domain.PriorityMedium,
+		Importance: domain.PriorityHigh, Category: domain.CategoryTask, Status: domain.StatusNew}
+	if err := s.Tasks.Create(ctx, personal); err != nil {
+		t.Fatal(err)
+	}
+	forwarded := &domain.Task{ConnectionID: "c1", ChatID: 0, SenderID: 42, Title: "forwarded", Priority: domain.PriorityMedium,
+		Category: domain.CategoryTask, Status: domain.StatusNew} // no chat: must never be nudged
+	if err := s.Tasks.Create(ctx, forwarded); err != nil {
+		t.Fatal(err)
+	}
+	ticket := &domain.Task{ConnectionID: domain.HelpdeskConnectionID, ChatID: 7, SenderID: 7, Title: "ticket", Priority: domain.PriorityMedium,
+		Category: domain.CategoryTask, Status: domain.StatusNew} // helpdesk: must never be nudged
+	if err := s.Tasks.Create(ctx, ticket); err != nil {
+		t.Fatal(err)
+	}
+
+	// custom reminder (feature 3)
+	future := time.Now().Add(time.Hour)
+	personal.RemindAt = &future
+	if err := s.Tasks.Update(ctx, personal); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := s.Tasks.DueRemind(ctx, time.Now()); err != nil || len(due) != 0 {
+		t.Fatalf("future reminder must not be due yet: %+v err=%v", due, err)
+	}
+	if due, err := s.Tasks.DueRemind(ctx, future.Add(time.Minute)); err != nil || len(due) != 1 || due[0].ID != personal.ID {
+		t.Fatalf("due remind: %+v err=%v", due, err)
+	}
+	if got, _ := s.Tasks.Get(ctx, personal.ID); got.Importance != domain.PriorityHigh {
+		t.Errorf("importance roundtrip lost: %+v", got)
+	}
+
+	// periodic personal nudge (feature 1): fresh tasks aren't due, "created long ago" ones are
+	cutoff := time.Now().Add(-30 * time.Minute)
+	due, err := s.Tasks.DuePersonalNudge(ctx, cutoff)
+	if err != nil || len(due) != 0 {
+		t.Fatalf("freshly created task must not be due: %+v err=%v", due, err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if _, err := s.db.ExecContext(ctx, `UPDATE tasks SET created_at = ? WHERE id = ?`, old.Unix(), personal.ID); err != nil {
+		t.Fatal(err)
+	}
+	due, err = s.Tasks.DuePersonalNudge(ctx, cutoff)
+	if err != nil || len(due) != 1 || due[0].ID != personal.ID {
+		t.Fatalf("due personal nudge: %+v err=%v", due, err)
+	}
+
+	// merge (feature 4): merged_into round-trips
+	personal.MergedInto = forwarded.ID
+	if err := s.Tasks.Update(ctx, personal); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Tasks.Get(ctx, personal.ID); got.MergedInto != forwarded.ID {
+		t.Errorf("merged_into roundtrip lost: %+v", got)
+	}
+}
+
 func TestSettingsAndConnections(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

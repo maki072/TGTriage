@@ -19,18 +19,21 @@ var _ domain.TaskRepository = (*TaskRepo)(nil)
 
 const taskColumns = `id, connection_id, chat_id, sender_id, sender_name, sender_username, source_message_ids, source_text,
 	title, description, priority, category, deadline, draft_reply, reply_strategy, confidence, status, prev_status,
-	snooze_until, analysis_id, provider, model, reply_sent_at, reply_text, created_at, updated_at, closed_at`
+	snooze_until, analysis_id, provider, model, reply_sent_at, reply_text, importance, remind_at, last_reminded_at,
+	merged_into, created_at, updated_at, closed_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (domain.Task, error) {
 	var (
 		t                                         domain.Task
 		srcIDs, priority, category, status, prev  string
+		importance                                string
 		deadline, snooze, replySent, created, upd int64
-		closed                                    int64
+		closed, remindAt, lastReminded            int64
 	)
 	err := sc.Scan(&t.ID, &t.ConnectionID, &t.ChatID, &t.SenderID, &t.SenderName, &t.SenderUsername, &srcIDs, &t.SourceText,
 		&t.Title, &t.Description, &priority, &category, &deadline, &t.DraftReply, &t.ReplyStrategy, &t.Confidence, &status, &prev,
-		&snooze, &t.AnalysisID, &t.Provider, &t.Model, &replySent, &t.ReplyText, &created, &upd, &closed)
+		&snooze, &t.AnalysisID, &t.Provider, &t.Model, &replySent, &t.ReplyText, &importance, &remindAt, &lastReminded,
+		&t.MergedInto, &created, &upd, &closed)
 	if err != nil {
 		return t, err
 	}
@@ -44,6 +47,9 @@ func scanTask(sc interface{ Scan(...any) error }) (domain.Task, error) {
 	t.Deadline = ptrFromUnix(deadline)
 	t.SnoozeUntil = ptrFromUnix(snooze)
 	t.ReplySentAt = ptrFromUnix(replySent)
+	t.Importance = domain.ParsePriority(importance)
+	t.RemindAt = ptrFromUnix(remindAt)
+	t.LastRemindedAt = ptrFromUnix(lastReminded)
 	t.CreatedAt = fromUnix(created)
 	t.UpdatedAt = fromUnix(upd)
 	t.ClosedAt = ptrFromUnix(closed)
@@ -61,12 +67,14 @@ func (r *TaskRepo) Create(ctx context.Context, t *domain.Task) error {
 		(connection_id, chat_id, sender_id, sender_name, sender_username, source_message_ids, source_text,
 		 title, description, priority, priority_rank, category, deadline, draft_reply, reply_strategy, confidence,
 		 status, prev_status, snooze_until, analysis_id, provider, model, reply_sent_at, reply_text,
+		 importance, remind_at, last_reminded_at, merged_into,
 		 created_at, updated_at, closed_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ConnectionID, t.ChatID, t.SenderID, t.SenderName, t.SenderUsername, string(src), t.SourceText,
 		t.Title, t.Description, string(t.Priority), t.Priority.Rank(), string(t.Category), ptrToUnix(t.Deadline),
 		t.DraftReply, t.ReplyStrategy, t.Confidence, string(t.Status), string(t.PrevStatus), ptrToUnix(t.SnoozeUntil),
 		t.AnalysisID, t.Provider, t.Model, ptrToUnix(t.ReplySentAt), t.ReplyText,
+		string(t.Importance), ptrToUnix(t.RemindAt), ptrToUnix(t.LastRemindedAt), t.MergedInto,
 		toUnix(t.CreatedAt), toUnix(t.UpdatedAt), ptrToUnix(t.ClosedAt))
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)
@@ -85,11 +93,13 @@ func (r *TaskRepo) Update(ctx context.Context, t *domain.Task) error {
 	res, err := r.db.ExecContext(ctx, `UPDATE tasks SET
 		sender_name = ?, sender_username = ?, source_message_ids = ?, source_text = ?, title = ?, description = ?,
 		priority = ?, priority_rank = ?, category = ?, deadline = ?, draft_reply = ?, reply_strategy = ?, confidence = ?,
-		status = ?, prev_status = ?, snooze_until = ?, reply_sent_at = ?, reply_text = ?, updated_at = ?, closed_at = ?
+		status = ?, prev_status = ?, snooze_until = ?, reply_sent_at = ?, reply_text = ?,
+		importance = ?, remind_at = ?, last_reminded_at = ?, merged_into = ?, updated_at = ?, closed_at = ?
 		WHERE id = ?`,
 		t.SenderName, t.SenderUsername, string(src), t.SourceText, t.Title, t.Description,
 		string(t.Priority), t.Priority.Rank(), string(t.Category), ptrToUnix(t.Deadline), t.DraftReply, t.ReplyStrategy, t.Confidence,
 		string(t.Status), string(t.PrevStatus), ptrToUnix(t.SnoozeUntil), ptrToUnix(t.ReplySentAt), t.ReplyText,
+		string(t.Importance), ptrToUnix(t.RemindAt), ptrToUnix(t.LastRemindedAt), t.MergedInto,
 		toUnix(t.UpdatedAt), ptrToUnix(t.ClosedAt), t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
@@ -190,6 +200,46 @@ func (r *TaskRepo) DueSnoozed(ctx context.Context, now time.Time) ([]domain.Task
 		string(domain.StatusSnoozed), now.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("due snoozed: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (r *TaskRepo) DueRemind(ctx context.Context, now time.Time) ([]domain.Task, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks
+		WHERE remind_at > 0 AND remind_at <= ? AND status IN (?, ?, ?) ORDER BY remind_at`,
+		now.Unix(), string(domain.StatusNew), string(domain.StatusInProgress), string(domain.StatusSnoozed))
+	if err != nil {
+		return nil, fmt.Errorf("due remind: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (r *TaskRepo) DuePersonalNudge(ctx context.Context, cutoff time.Time) ([]domain.Task, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks
+		WHERE status IN (?, ?) AND connection_id <> ? AND chat_id <> 0 AND merged_into = 0
+			AND (CASE WHEN last_reminded_at > 0 THEN last_reminded_at ELSE created_at END) <= ?
+		ORDER BY created_at`,
+		string(domain.StatusNew), string(domain.StatusInProgress), domain.HelpdeskConnectionID, cutoff.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("due personal nudge: %w", err)
 	}
 	defer rows.Close()
 	var out []domain.Task

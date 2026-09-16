@@ -107,6 +107,9 @@ type Settings struct {
 	NotifyDoneOnClose bool
 	OwnerAbout        string
 	DeepLinks         bool
+	// PersonalReminderMinutes: how often to re-notify the owner about an open task that came from a
+	// personal (Telegram Business) chat, until it's closed. 0 — no repeated reminders.
+	PersonalReminderMinutes int
 
 	DigestEnabled bool
 	DigestTime    string // HH:MM in service timezone

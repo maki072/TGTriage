@@ -80,6 +80,24 @@ func (b *Bot) SnoozeFired(ctx context.Context, t *domain.Task) {
 	}
 }
 
+// TaskReminder implements service.SchedulerNotifier: a one-off custom reminder set from the Mini App.
+func (b *Bot) TaskReminder(ctx context.Context, t *domain.Task) {
+	if t.IsHelpdesk() {
+		b.topicNotice(ctx, t, fmt.Sprintf("🔔 <b>Напоминание по тикету #%d</b> · %s", t.ID, esc(trunc(t.Title, 100))))
+		return
+	}
+	if err := b.renderTask(ctx, nil, t, "🔔 <b>Напоминание о задаче</b>", nil); err != nil {
+		b.log.Error("notify task reminder", "task_id", t.ID, "err", err)
+	}
+}
+
+// PersonalNudge implements service.SchedulerNotifier: a repeated reminder about an open personal task.
+func (b *Bot) PersonalNudge(ctx context.Context, t *domain.Task) {
+	if err := b.renderTask(ctx, nil, t, "🔁 <b>Задача всё ещё не закрыта</b>", nil); err != nil {
+		b.log.Error("notify personal nudge", "task_id", t.ID, "err", err)
+	}
+}
+
 // Digest implements service.SchedulerNotifier.
 func (b *Bot) Digest(ctx context.Context, d *service.Digest) {
 	text, markup := b.digestView(d)

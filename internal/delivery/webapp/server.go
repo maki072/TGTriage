@@ -103,6 +103,9 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /api/tasks/{id}/snooze", s.handleTaskSnooze)
 	api.HandleFunc("POST /api/tasks/{id}/draft", s.handleTaskDraft)
 	api.HandleFunc("POST /api/tasks/{id}/reply", s.handleTaskReply)
+	api.HandleFunc("POST /api/tasks/{id}/edit", s.handleTaskEdit)
+	api.HandleFunc("POST /api/tasks/{id}/remind", s.handleTaskRemind)
+	api.HandleFunc("POST /api/tasks/{id}/merge", s.handleTaskMerge)
 
 	api.HandleFunc("GET /api/helpdesk/users", s.handleHDUsers)
 	api.HandleFunc("GET /api/helpdesk/users/{id}", s.handleHDUser)

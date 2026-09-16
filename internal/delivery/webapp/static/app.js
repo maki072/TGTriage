@@ -176,6 +176,9 @@ function fmtSize(n) {
 
 const PRIORITY_LABEL = { critical: 'Критический', high: 'Высокий', medium: 'Средний', low: 'Низкий' };
 const PRIORITY_EMOJI = { critical: '🔴', high: '🟠', medium: '🟡', low: '🟢' };
+const PRIORITY_OPTIONS = [['low', 'Низкая'], ['medium', 'Средняя'], ['high', 'Высокая'], ['critical', 'Критическая']];
+const IMPORTANCE_LABEL = { critical: 'Критическая', high: 'Высокая', medium: 'Средняя', low: 'Низкая' };
+const IMPORTANCE_EMOJI = { critical: '⭐️⭐️⭐️', high: '⭐️⭐️', medium: '⭐️', low: '' };
 const CATEGORY_LABEL = { bug: '🐞 Баг', help_request: '🆘 Помощь', task: '📌 Задача', question: '❓ Вопрос', deadline: '⏳ Дедлайн', agreement: '🤝 Договорённость', other: '📎 Другое' };
 const STATUS_LABEL = { new: '🆕 Новая', in_progress: '👀 В работе', snoozed: '⏰ Отложена', done: '✅ Завершена', false_positive: '🗑 Ошибка' };
 const STRATEGY_LABEL = { confirm: 'подтверждение', clarify: 'уточняющий вопрос', decline: 'отказ', none: 'ответ' };
@@ -444,15 +447,18 @@ function taskDetailHtml(t) {
     <div class="task-meta" style="margin-top:6px">
       <span class="badge status-${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
       <span class="badge">${PRIORITY_EMOJI[t.priority] || ''} ${PRIORITY_LABEL[t.priority] || t.priority}</span>
+      ${t.importance && t.importance !== 'medium' ? `<span class="badge">${IMPORTANCE_EMOJI[t.importance] || ''} важность: ${IMPORTANCE_LABEL[t.importance] || t.importance}</span>` : ''}
       <span class="badge">${CATEGORY_LABEL[t.category] || t.category}</span>
       ${t.helpdesk ? '<span class="badge">🎫 Хелпдеск</span>' : ''}
       ${t.forwarded ? '<span class="badge">📨 Переслано</span>' : ''}
+      ${t.merged_into ? `<span class="badge">🔀 объединено в #${t.merged_into}</span>` : ''}
     </div>
     <div class="kv" style="margin-top:10px">
       <div><span>${t.helpdesk ? 'Пользователь' : 'От'}: </span>${senderLine}</div>
       <div><span>Создано: </span>${fmtDT(t.created_at)}</div>
       ${t.deadline ? `<div><span>Срок: </span>${fmtDT(t.deadline)}${t.overdue ? ' ⚠️ просрочено' : ''}</div>` : ''}
       ${t.status === 'snoozed' && t.snooze_until ? `<div><span>Отложено до: </span>${fmtDT(t.snooze_until)}</div>` : ''}
+      ${t.remind_at ? `<div><span>🔔 Напомнить: </span>${fmtDT(t.remind_at)}</div>` : ''}
       ${hu && hu.source ? `<div><span>Источник: </span>${esc(hu.source)}</div>` : ''}
     </div>
     ${hu ? `<div class="task-meta" style="margin-top:8px">${userBadges(hu)}</div>
@@ -468,6 +474,9 @@ function taskDetailHtml(t) {
   ${t.provider ? `<div class="card detail-section muted small">🤖 ${esc(t.provider)} · ${esc(t.model)} · уверенность ${Math.round(t.confidence * 100)}%</div>` : ''}
   <div id="replyBox"></div>
   <div id="snoozeBox"></div>
+  <div id="editBox"></div>
+  <div id="remindBox"></div>
+  <div id="mergeBox"></div>
   <div class="card actions">${isOpen(t.status) ? actionButtons(t) : reopenButtons(t)}</div>`;
 }
 
@@ -482,6 +491,9 @@ function actionButtons(t) {
   if (t.status !== 'in_progress') html += `<button class="btn" data-act="work">👀 В работу</button>`;
   html += `<button class="btn" data-act="close">✅ Закрыть</button>`;
   html += `<button class="btn" data-act="snooze-open">⏰ Отложить</button>`;
+  html += `<button class="btn" data-act="edit-open">✏️ Редактировать</button>`;
+  html += `<button class="btn" data-act="remind-open">🔔 Напомнить отдельно</button>`;
+  html += `<button class="btn" data-act="merge-open">🔀 Объединить</button>`;
   html += `<button class="btn danger" data-act="fp">🗑 Ошибка</button>`;
   return html;
 }
@@ -500,6 +512,9 @@ async function handleTaskAction(t, action, btn) {
     case 'close': return handleClose(t);
     case 'reply-open': return openReplyBox(t);
     case 'snooze-open': return openSnoozeBox(t);
+    case 'edit-open': return openEditBox(t);
+    case 'remind-open': return openRemindBox(t);
+    case 'merge-open': return openMergeBox(t);
     case 'dialog': return openView({ type: 'user', id: t.chat_id });
   }
 }
@@ -583,6 +598,85 @@ function openSnoozeBox(t) {
     const v = document.getElementById('snoozeCustom').value;
     if (!v) { toast('Укажите дату и время', true); return; }
     doSnooze(new Date(v).toISOString());
+  });
+}
+
+function openEditBox(t) {
+  const box = document.getElementById('editBox');
+  box.innerHTML = `<div class="card detail-section">
+    <h3>✏️ Редактировать задачу</h3>
+    <input class="input" id="editTitle" placeholder="Заголовок" value="${esc(t.title)}">
+    <textarea class="input" id="editDescription" placeholder="Суть задачи">${esc(t.description)}</textarea>
+    <div class="setting-row"><div class="label">Срочность</div>
+      <select class="input narrow" id="editPriority">${PRIORITY_OPTIONS.map(([v, l]) => `<option value="${v}"${v === t.priority ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="setting-row"><div class="label">Важность</div>
+      <select class="input narrow" id="editImportance">${PRIORITY_OPTIONS.map(([v, l]) => `<option value="${v}"${v === (t.importance || 'medium') ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="actions"><button class="btn primary full" id="editSave">💾 Сохранить</button></div>
+  </div>`;
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  document.getElementById('editSave').addEventListener('click', e => {
+    const title = document.getElementById('editTitle').value.trim();
+    if (!title) { toast('Введите заголовок', true); return; }
+    const body = {
+      title, description: document.getElementById('editDescription').value.trim(),
+      priority: document.getElementById('editPriority').value, importance: document.getElementById('editImportance').value,
+    };
+    withBusy(e.target, async () => { await api('POST', `/api/tasks/${t.id}/edit`, body); toast('💾 Сохранено'); renderTaskDetail(t.id); });
+  });
+}
+
+const REMIND_PRESETS = [['+1 час', 60], ['+3 часа', 180], ['+1 сутки', 1440]];
+
+function openRemindBox(t) {
+  const box = document.getElementById('remindBox');
+  box.innerHTML = `<div class="card detail-section">
+    <h3>🔔 Напомнить об этой задаче отдельно</h3>
+    <div class="chiprow">
+      ${REMIND_PRESETS.map(([label, min]) => `<button class="chip" data-min="${min}">${label}</button>`).join('')}
+    </div>
+    <div class="actions" style="margin-top:8px">
+      <input class="input narrow" type="number" min="1" id="remindN" placeholder="N" style="max-width:80px">
+      <select class="input narrow" id="remindUnit"><option value="60">часов</option><option value="1440">суток</option></select>
+      <button class="btn" id="remindManualBtn">Напомнить</button>
+    </div>
+    ${t.remind_at ? `<div class="actions"><button class="btn ghost full" id="remindClear">✖️ Отменить напоминание</button></div>` : ''}
+  </div>`;
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const doRemind = async atISO => {
+    try { await api('POST', `/api/tasks/${t.id}/remind`, { at: atISO }); toast('🔔 Напоминание установлено'); renderTaskDetail(t.id); }
+    catch (e) { toast(e.message, true); }
+  };
+  box.querySelectorAll('[data-min]').forEach(btn => btn.addEventListener('click', () => doRemind(new Date(Date.now() + Number(btn.dataset.min) * 60000).toISOString())));
+  document.getElementById('remindManualBtn').addEventListener('click', () => {
+    const n = Number(document.getElementById('remindN').value);
+    if (!n || n <= 0) { toast('Введите число', true); return; }
+    const unit = Number(document.getElementById('remindUnit').value);
+    doRemind(new Date(Date.now() + n * unit * 60000).toISOString());
+  });
+  const clearBtn = document.getElementById('remindClear');
+  if (clearBtn) clearBtn.addEventListener('click', () => withBusy(clearBtn, async () => {
+    await api('POST', `/api/tasks/${t.id}/remind`, { at: '' }); toast('✖️ Напоминание отменено'); renderTaskDetail(t.id);
+  }));
+}
+
+function openMergeBox(t) {
+  const box = document.getElementById('mergeBox');
+  box.innerHTML = `<div class="card detail-section">
+    <h3>🔀 Объединить с другой задачей</h3>
+    <p class="hint-text" style="margin:0 0 8px">Все данные этой задачи перенесутся в задачу с указанным номером, а эта — закроется.</p>
+    <input class="input narrow" type="number" min="1" id="mergeTarget" placeholder="Номер задачи, напр. 42">
+    <div class="actions"><button class="btn primary full" id="mergeBtn">🔀 Объединить</button></div>
+  </div>`;
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  document.getElementById('mergeBtn').addEventListener('click', e => {
+    const targetID = Number(document.getElementById('mergeTarget').value);
+    if (!targetID || targetID <= 0) { toast('Введите номер задачи', true); return; }
+    if (targetID === t.id) { toast('Нельзя объединить задачу с собой', true); return; }
+    withBusy(e.target, async () => {
+      await api('POST', `/api/tasks/${t.id}/merge`, { target_id: targetID });
+      toast('🔀 Объединено в #' + targetID);
+      openView({ type: 'task', id: targetID });
+    });
   });
 }
 

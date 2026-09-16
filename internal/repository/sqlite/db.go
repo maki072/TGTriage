@@ -203,6 +203,15 @@ var migrations = [][]string{
 		)`,
 		`CREATE INDEX idx_tasks_connection ON tasks (connection_id, status)`,
 	},
+	// v3: task editing, custom reminders, periodic personal reminders, merging
+	{
+		`ALTER TABLE tasks ADD COLUMN importance TEXT NOT NULL DEFAULT 'medium'`,
+		`ALTER TABLE tasks ADD COLUMN remind_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE tasks ADD COLUMN last_reminded_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE tasks ADD COLUMN merged_into INTEGER NOT NULL DEFAULT 0`,
+		`CREATE INDEX idx_tasks_remind_at ON tasks (remind_at)`,
+		`CREATE INDEX idx_tasks_personal_nudge ON tasks (status, connection_id, last_reminded_at)`,
+	},
 }
 
 // Backup writes a consistent, compacted copy of the database to path (which must not exist).

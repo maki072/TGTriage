@@ -121,10 +121,17 @@ type Task struct {
 	Model            string
 	ReplySentAt      *time.Time
 	ReplyText        string
+	Importance       Priority   // separate from Priority (urgency): the Eisenhower "important" axis
+	RemindAt         *time.Time // one-off custom reminder set by the owner, independent of snooze
+	LastRemindedAt   *time.Time // bookkeeping for periodic reminders about open personal-chat tasks
+	MergedInto       int64      // >0: this task's data was folded into task MergedInto, task itself is closed
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	ClosedAt         *time.Time
 }
+
+// IsMerged reports whether the task was merged into another one.
+func (t *Task) IsMerged() bool { return t.MergedInto != 0 }
 
 // FirstSourceMessageID returns the first Telegram message id of the source batch (0 if none).
 func (t *Task) FirstSourceMessageID() int {

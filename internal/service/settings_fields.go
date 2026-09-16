@@ -451,6 +451,9 @@ func buildFields() []SettingField {
 			func(s *domain.Settings) *bool { return &s.NotifyDoneOnClose }),
 		boolField("ui.deep_links", "DEEP_LINKS", "triage", "Ссылки на исходные сообщения",
 			"tg://openmessage в карточках личных задач", "true", func(s *domain.Settings) *bool { return &s.DeepLinks }),
+		intField("triage.personal_reminder_minutes", "", "triage", "Повторное напоминание о личных задачах, мин",
+			"Бот повторно напоминает об открытой задаче из личных сообщений, пока её не закроют. 0 — выключено",
+			"0", 0, 10080, func(s *domain.Settings) *int { return &s.PersonalReminderMinutes }),
 	)
 
 	// general

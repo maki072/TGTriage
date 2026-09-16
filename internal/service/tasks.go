@@ -144,6 +144,162 @@ func (s *TaskService) Snooze(ctx context.Context, id int64, until time.Time) (*d
 	return t, nil
 }
 
+// EditInput is the set of task fields the owner can change by hand.
+type EditInput struct {
+	Title       string
+	Description string
+	Priority    domain.Priority
+	Importance  domain.Priority
+}
+
+// Edit updates a task's text and its urgency/importance.
+func (s *TaskService) Edit(ctx context.Context, id int64, in EditInput) (*domain.Task, error) {
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		return nil, domain.ErrInvalidInput
+	}
+	t, err := s.tasks.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	t.Title = title
+	t.Description = strings.TrimSpace(in.Description)
+	t.Priority = domain.ParsePriority(string(in.Priority))
+	t.Importance = domain.ParsePriority(string(in.Importance))
+	if err := s.tasks.Update(ctx, t); err != nil {
+		return nil, err
+	}
+	s.log.Info("task edited", "task_id", t.ID)
+	s.changed(ctx, t)
+	return t, nil
+}
+
+// SetReminder schedules a one-off custom reminder about the task, independent of its status/snooze.
+func (s *TaskService) SetReminder(ctx context.Context, id int64, at time.Time) (*domain.Task, error) {
+	if !at.After(time.Now()) {
+		return nil, domain.ErrInvalidInput
+	}
+	t, err := s.tasks.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	t.RemindAt = &at
+	if err := s.tasks.Update(ctx, t); err != nil {
+		return nil, err
+	}
+	s.changed(ctx, t)
+	return t, nil
+}
+
+// ClearReminder cancels a task's custom reminder.
+func (s *TaskService) ClearReminder(ctx context.Context, id int64) (*domain.Task, error) {
+	t, err := s.tasks.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	t.RemindAt = nil
+	if err := s.tasks.Update(ctx, t); err != nil {
+		return nil, err
+	}
+	s.changed(ctx, t)
+	return t, nil
+}
+
+// WakeReminders fires due custom reminders (see SetReminder) and clears them.
+func (s *TaskService) WakeReminders(ctx context.Context) ([]domain.Task, error) {
+	due, err := s.tasks.DueRemind(ctx, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	fired := make([]domain.Task, 0, len(due))
+	for _, t := range due {
+		t.RemindAt = nil
+		if err := s.tasks.Update(ctx, &t); err != nil {
+			s.log.Error("clear fired reminder", "task_id", t.ID, "err", err)
+			continue
+		}
+		s.changed(ctx, &t)
+		fired = append(fired, t)
+	}
+	return fired, nil
+}
+
+// NudgePersonal re-notifies about open personal-chat tasks that have been waiting at least
+// minutes since creation or the last nudge. minutes<=0 disables the feature.
+func (s *TaskService) NudgePersonal(ctx context.Context, minutes int) ([]domain.Task, error) {
+	if minutes <= 0 {
+		return nil, nil
+	}
+	cutoff := time.Now().Add(-time.Duration(minutes) * time.Minute)
+	due, err := s.tasks.DuePersonalNudge(ctx, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	nudged := make([]domain.Task, 0, len(due))
+	for _, t := range due {
+		t.LastRemindedAt = &now
+		if err := s.tasks.Update(ctx, &t); err != nil {
+			s.log.Error("mark personal nudge", "task_id", t.ID, "err", err)
+			continue
+		}
+		nudged = append(nudged, t)
+	}
+	return nudged, nil
+}
+
+// Merge folds source's data into target and closes source. Both tasks must be distinct and not
+// already merged.
+func (s *TaskService) Merge(ctx context.Context, sourceID, targetID int64) (*domain.Task, error) {
+	if sourceID == targetID {
+		return nil, domain.ErrInvalidInput
+	}
+	src, err := s.tasks.Get(ctx, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	target, err := s.tasks.Get(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if src.IsMerged() || target.IsMerged() {
+		return nil, domain.ErrInvalidInput
+	}
+	target.SourceMessageIDs = append(target.SourceMessageIDs, src.SourceMessageIDs...)
+	if strings.TrimSpace(src.SourceText) != "" {
+		target.SourceText = strings.TrimSpace(target.SourceText + "\n\n---\n" + src.SourceText)
+	}
+	if d := strings.TrimSpace(src.Description); d != "" && d != strings.TrimSpace(target.Description) {
+		target.Description = strings.TrimSpace(target.Description + "\n\n" + d)
+	}
+	if src.Priority.Rank() < target.Priority.Rank() {
+		target.Priority = src.Priority
+	}
+	if src.Importance.Rank() < target.Importance.Rank() {
+		target.Importance = src.Importance
+	}
+	if src.Deadline != nil && (target.Deadline == nil || src.Deadline.Before(*target.Deadline)) {
+		target.Deadline = src.Deadline
+	}
+	if err := s.tasks.Update(ctx, target); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	src.Status = domain.StatusDone
+	src.PrevStatus = ""
+	src.SnoozeUntil = nil
+	src.RemindAt = nil
+	src.MergedInto = target.ID
+	src.ClosedAt = &now
+	if err := s.tasks.Update(ctx, src); err != nil {
+		return nil, err
+	}
+	s.log.Info("tasks merged", "source_id", src.ID, "target_id", target.ID)
+	s.changed(ctx, src)
+	s.changed(ctx, target)
+	return target, nil
+}
+
 // WakeSnoozed restores tasks whose snooze time has come.
 func (s *TaskService) WakeSnoozed(ctx context.Context) ([]domain.Task, error) {
 	due, err := s.tasks.DueSnoozed(ctx, time.Now())

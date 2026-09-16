@@ -12,6 +12,10 @@ import (
 type SchedulerNotifier interface {
 	SnoozeFired(ctx context.Context, t *domain.Task)
 	Digest(ctx context.Context, d *Digest)
+	// TaskReminder fires a one-off custom reminder set on a task (see TaskService.SetReminder).
+	TaskReminder(ctx context.Context, t *domain.Task)
+	// PersonalNudge fires a repeated reminder about an open personal-chat task.
+	PersonalNudge(ctx context.Context, t *domain.Task)
 }
 
 // Scheduler runs periodic jobs: snooze reminders, morning digest, history retention, helpdesk
@@ -57,6 +61,8 @@ func (s *Scheduler) tick(ctx context.Context) {
 		}
 	}()
 	s.wakeSnoozed(ctx)
+	s.fireReminders(ctx)
+	s.personalNudges(ctx)
 	s.digest(ctx)
 	s.cleanup(ctx)
 	if s.helpdesk != nil {
@@ -75,6 +81,29 @@ func (s *Scheduler) wakeSnoozed(ctx context.Context) {
 	}
 	for i := range woken {
 		s.notifier.SnoozeFired(ctx, &woken[i])
+	}
+}
+
+func (s *Scheduler) fireReminders(ctx context.Context) {
+	fired, err := s.tasks.WakeReminders(ctx)
+	if err != nil {
+		s.log.Error("fire reminders", "err", err)
+		return
+	}
+	for i := range fired {
+		s.notifier.TaskReminder(ctx, &fired[i])
+	}
+}
+
+func (s *Scheduler) personalNudges(ctx context.Context) {
+	minutes := s.settings.Get().PersonalReminderMinutes
+	nudged, err := s.tasks.NudgePersonal(ctx, minutes)
+	if err != nil {
+		s.log.Error("personal nudges", "err", err)
+		return
+	}
+	for i := range nudged {
+		s.notifier.PersonalNudge(ctx, &nudged[i])
 	}
 }
 

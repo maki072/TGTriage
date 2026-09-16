@@ -22,6 +22,12 @@ func (s *Server) scopeFor(r *http.Request) domain.TaskScope {
 	return domain.ParseTaskScope(r.URL.Query().Get("scope"))
 }
 
+// canAccess reports whether the requester may see t: the owner sees everything, operators only
+// helpdesk tickets.
+func (s *Server) canAccess(r *http.Request, t *domain.Task) bool {
+	return principalFrom(r).isOwner() || t.IsHelpdesk()
+}
+
 // loadTask loads a task the requester may access.
 func (s *Server) loadTask(w http.ResponseWriter, r *http.Request) (*domain.Task, bool) {
 	id, ok := pathID(r)
@@ -34,7 +40,7 @@ func (s *Server) loadTask(w http.ResponseWriter, r *http.Request) (*domain.Task,
 		handleErr(w, err)
 		return nil, false
 	}
-	if !principalFrom(r).isOwner() && !t.IsHelpdesk() {
+	if !s.canAccess(r, t) {
 		writeError(w, http.StatusNotFound, "not found")
 		return nil, false
 	}
@@ -184,6 +190,91 @@ func (s *Server) handleTaskSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.taskResponse(r.Context(), t))
+}
+
+func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.loadTask(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Priority    string `json:"priority"`
+		Importance  string `json:"importance"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	t, err := s.tasks.Edit(r.Context(), t.ID, service.EditInput{
+		Title: body.Title, Description: body.Description,
+		Priority: domain.Priority(body.Priority), Importance: domain.Priority(body.Importance),
+	})
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.taskResponse(r.Context(), t))
+}
+
+func (s *Server) handleTaskRemind(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.loadTask(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		At string `json:"at"` // RFC3339; empty cancels the reminder
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	var (
+		res *domain.Task
+		err error
+	)
+	if body.At == "" {
+		res, err = s.tasks.ClearReminder(r.Context(), t.ID)
+	} else {
+		at, perr := time.Parse(time.RFC3339, body.At)
+		if perr != nil {
+			writeError(w, http.StatusBadRequest, "at must be an RFC3339 timestamp")
+			return
+		}
+		res, err = s.tasks.SetReminder(r.Context(), t.ID, at)
+	}
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.taskResponse(r.Context(), res))
+}
+
+func (s *Server) handleTaskMerge(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.loadTask(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		TargetID int64 `json:"target_id"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	target, err := s.tasks.Get(r.Context(), body.TargetID)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	if !s.canAccess(r, target) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	res, err := s.tasks.Merge(r.Context(), t.ID, body.TargetID)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.taskResponse(r.Context(), res))
 }
 
 func (s *Server) handleTaskDraft(w http.ResponseWriter, r *http.Request) {
