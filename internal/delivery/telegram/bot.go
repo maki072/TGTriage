@@ -78,17 +78,22 @@ func (b *Bot) Run(ctx context.Context) {
 	b.api.Poll(ctx, b.handle)
 }
 
-// EnsureMenuButton points the persistent menu button (next to the message box, in every private
-// chat) at the Mini App, so users open it directly instead of hunting for a command or a button
-// buried in some message. Called on start and again whenever WebAppPublicURL changes.
+// EnsureMenuButton points the persistent menu button (next to the message box) at the Mini App —
+// but only in the owner's own private chat: support-seekers writing to the bot have no business
+// in the panel, and operators already get an inline "Открыть веб-панель" button (in ticket cards
+// and in operatorHelp), so the global default stays the plain command menu for everyone else.
+// Called on start and again whenever WebAppPublicURL changes.
 func (b *Bot) EnsureMenuButton(ctx context.Context) {
+	if err := b.api.SetChatMenuButton(ctx, 0, &telegram.MenuButton{Type: "default"}); err != nil {
+		b.log.Warn("reset default menu button failed", "err", err)
+	}
 	url := b.settings.Get().WebAppPublicURL
 	if url == "" {
 		return
 	}
 	mb := &telegram.MenuButton{Type: "web_app", Text: "Открыть панель", WebApp: &telegram.WebAppInfo{URL: url}}
-	if err := b.api.SetChatMenuButton(ctx, 0, mb); err != nil {
-		b.log.Warn("setChatMenuButton failed", "err", err)
+	if err := b.api.SetChatMenuButton(ctx, b.cfg.OwnerID, mb); err != nil {
+		b.log.Warn("setChatMenuButton for owner failed", "err", err)
 	}
 }
 
