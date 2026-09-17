@@ -34,8 +34,11 @@ type TaskRepository interface {
 	// DuePersonalNudge returns open personal-chat tasks due for a repeated reminder: tasks whose
 	// last reminder (or creation, if never reminded) is at or before cutoff.
 	DuePersonalNudge(ctx context.Context, cutoff time.Time) ([]Task, error)
-	CountByStatus(ctx context.Context, scope TaskScope, since time.Time) (map[TaskStatus]int, error)
-	CountOverdue(ctx context.Context, scope TaskScope, now time.Time) (int, error)
+	// connID, when non-empty, additionally narrows to one exact connection_id (a specific bot's
+	// helpdesk, via HelpdeskConnectionFor) — used to keep one organization's stats from leaking
+	// into another's.
+	CountByStatus(ctx context.Context, scope TaskScope, connID string, since time.Time) (map[TaskStatus]int, error)
+	CountOverdue(ctx context.Context, scope TaskScope, connID string, now time.Time) (int, error)
 }
 
 // AnalysisRepository stores LLM call audit log.

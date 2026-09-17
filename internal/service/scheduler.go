@@ -21,22 +21,38 @@ type SchedulerNotifier interface {
 // Scheduler runs periodic jobs: snooze reminders, morning digest, history retention, helpdesk
 // reminders about unanswered users and database backups.
 type Scheduler struct {
-	tasks    *TaskService
-	settings *SettingsService
-	messages domain.MessageRepository
-	notifier SchedulerNotifier
-	helpdesk *HelpdeskService // optional
-	backups  *BackupService   // optional
-	interval time.Duration
-	log      *slog.Logger
+	tasks     *TaskService
+	settings  *SettingsService
+	messages  domain.MessageRepository
+	notifiers *BotRegistry[SchedulerNotifier]
+	helpdesks *BotRegistry[*HelpdeskService] // one entry per bot with the desk on; optional
+	backups   *BackupService                 // optional
+	interval  time.Duration
+	log       *slog.Logger
 }
 
 func NewScheduler(tasks *TaskService, settings *SettingsService, messages domain.MessageRepository,
 	notifier SchedulerNotifier, helpdesk *HelpdeskService, backups *BackupService, log *slog.Logger) *Scheduler {
-	return &Scheduler{
-		tasks: tasks, settings: settings, messages: messages, notifier: notifier, helpdesk: helpdesk, backups: backups,
-		interval: 30 * time.Second, log: log.With("component", "scheduler"),
+	helpdesks := NewBotRegistry[*HelpdeskService](nil)
+	if helpdesk != nil {
+		helpdesks.Set(0, helpdesk)
 	}
+	return &Scheduler{
+		tasks: tasks, settings: settings, messages: messages, notifiers: NewBotRegistry(notifier), helpdesks: helpdesks,
+		backups: backups, interval: 30 * time.Second, log: log.With("component", "scheduler"),
+	}
+}
+
+// RegisterBot and UnregisterBot let the bot runtime manager plug an additional bot's
+// delivery.Bot/HelpdeskService in and out as it starts and stops, without a restart.
+func (s *Scheduler) RegisterBot(botID int64, n SchedulerNotifier, h *HelpdeskService) {
+	s.notifiers.Set(botID, n)
+	s.helpdesks.Set(botID, h)
+}
+
+func (s *Scheduler) UnregisterBot(botID int64) {
+	s.notifiers.Unset(botID)
+	s.helpdesks.Unset(botID)
 }
 
 // Run blocks until ctx is cancelled.
@@ -65,11 +81,19 @@ func (s *Scheduler) tick(ctx context.Context) {
 	s.personalNudges(ctx)
 	s.digest(ctx)
 	s.cleanup(ctx)
-	if s.helpdesk != nil {
-		s.helpdesk.CheckReminders(ctx)
+	for _, h := range s.helpdesks.All() {
+		h.CheckReminders(ctx)
 	}
 	if s.backups != nil {
 		s.backups.RunIfDue(ctx)
+	}
+}
+
+// notifyTask calls fn on the SchedulerNotifier of the bot t belongs to; a task whose bot runtime
+// isn't currently live is silently skipped (it's still woken/reminded in the DB either way).
+func (s *Scheduler) notifyTask(t *domain.Task, fn func(SchedulerNotifier, *domain.Task)) {
+	if n, ok := s.notifiers.For(domain.ParseHelpdeskBotID(t.ConnectionID)); ok {
+		fn(n, t)
 	}
 }
 
@@ -80,7 +104,7 @@ func (s *Scheduler) wakeSnoozed(ctx context.Context) {
 		return
 	}
 	for i := range woken {
-		s.notifier.SnoozeFired(ctx, &woken[i])
+		s.notifyTask(&woken[i], func(n SchedulerNotifier, t *domain.Task) { n.SnoozeFired(ctx, t) })
 	}
 }
 
@@ -91,7 +115,7 @@ func (s *Scheduler) fireReminders(ctx context.Context) {
 		return
 	}
 	for i := range fired {
-		s.notifier.TaskReminder(ctx, &fired[i])
+		s.notifyTask(&fired[i], func(n SchedulerNotifier, t *domain.Task) { n.TaskReminder(ctx, t) })
 	}
 }
 
@@ -102,8 +126,10 @@ func (s *Scheduler) personalNudges(ctx context.Context) {
 		s.log.Error("personal nudges", "err", err)
 		return
 	}
-	for i := range nudged {
-		s.notifier.PersonalNudge(ctx, &nudged[i])
+	if n, ok := s.notifiers.For(0); ok {
+		for i := range nudged {
+			n.PersonalNudge(ctx, &nudged[i])
+		}
 	}
 }
 
@@ -133,12 +159,14 @@ func (s *Scheduler) digest(ctx context.Context) {
 		s.log.Error("save digest mark", "err", err)
 		return
 	}
-	d, err := s.tasks.BuildDigest(ctx, domain.ScopeAll)
+	d, err := s.tasks.BuildDigest(ctx, domain.ScopeAll, "")
 	if err != nil {
 		s.log.Error("build digest", "err", err)
 		return
 	}
-	s.notifier.Digest(ctx, d)
+	if n, ok := s.notifiers.For(0); ok {
+		n.Digest(ctx, d)
+	}
 }
 
 func (s *Scheduler) cleanup(ctx context.Context) {
@@ -156,8 +184,10 @@ func (s *Scheduler) cleanup(ctx context.Context) {
 		s.log.Error("cleanup messages", "err", err)
 		return
 	}
-	if s.helpdesk != nil {
-		if _, err := s.helpdesk.CleanupMessages(ctx, before); err != nil {
+	// DeleteMessagesOlderThan is bot-agnostic (a single hd_messages table), so any one live desk's
+	// CleanupMessages call covers every bot; only call it once.
+	if hs := s.helpdesks.All(); len(hs) > 0 {
+		if _, err := hs[0].CleanupMessages(ctx, before); err != nil {
 			s.log.Error("cleanup helpdesk mappings", "err", err)
 		}
 	}

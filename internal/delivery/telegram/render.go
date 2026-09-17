@@ -313,7 +313,7 @@ func closeConfirmKeyboard(id int64) *telegram.InlineKeyboardMarkup {
 // ---------- main menu ----------
 
 func (b *Bot) showMainMenu(ctx context.Context, ref *msgRef) error {
-	o, err := b.tasks.Overview(ctx, domain.ScopeAll)
+	o, err := b.tasks.Overview(ctx, domain.ScopeAll, "")
 	if err != nil {
 		return b.render(ctx, ref, "❌ "+esc(humanError(err)), kb(row(cb("🔄 Повторить", "m"))))
 	}
@@ -344,10 +344,11 @@ func (b *Bot) showMainMenu(ctx context.Context, ref *msgRef) error {
 		sb.WriteString("▶️ Личный триаж: активен")
 	}
 	fmt.Fprintf(&sb, " · дебаунс %d с · чувствительность %s\n", st.DebounceSeconds, sensitivityName(st.Sensitivity))
+	hd := b.helpdesk.Config()
 	switch {
-	case st.Helpdesk.Active():
+	case hd.Active():
 		sb.WriteString("🎧 Хелпдеск: ✅ включён\n\n")
-	case st.Helpdesk.Enabled:
+	case hd.Enabled:
 		sb.WriteString("🎧 Хелпдеск: ⚠️ не указана группа\n\n")
 	default:
 		sb.WriteString("🎧 Хелпдеск: выключен\n\n")
@@ -374,6 +375,10 @@ func (b *Bot) showSettings(ctx context.Context, ref *msgRef) error {
 	st := b.settings.Get()
 	var sb strings.Builder
 	sb.WriteString("⚙️ <b>Настройки</b>\n\n")
+	if b.cfg.BotDBID != 0 {
+		sb.WriteString("ℹ️ Это дополнительный бот. Ниже — общие настройки ИИ; свою группу, приветствие и часы работы " +
+			"настройте в веб-панели, раздел «Боты».\n\n")
+	}
 	sb.WriteString("🤖 <b>AI по очереди</b> — если ключ не отвечает, берётся следующий:\n")
 	if len(st.AIChain) == 0 {
 		sb.WriteString("   ❌ ключей нет — триаж не работает\n")
@@ -465,7 +470,7 @@ func (b *Bot) showModelMenu(ctx context.Context, ref *msgRef, provider string) e
 
 func (b *Bot) showStats(ctx context.Context, ref *msgRef) error {
 	const days = 30
-	s, err := b.tasks.Stats(ctx, domain.ScopeAll, days)
+	s, err := b.tasks.Stats(ctx, domain.ScopeAll, "", days)
 	if err != nil {
 		return b.renderError(ctx, ref, err)
 	}
@@ -506,7 +511,7 @@ func (b *Bot) showStats(ctx context.Context, ref *msgRef) error {
 // ---------- digest ----------
 
 func (b *Bot) sendDigest(ctx context.Context) error {
-	d, err := b.tasks.BuildDigest(ctx, domain.ScopeAll)
+	d, err := b.tasks.BuildDigest(ctx, domain.ScopeAll, "")
 	if err != nil {
 		return err
 	}

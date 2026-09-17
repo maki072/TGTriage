@@ -17,6 +17,9 @@ type Config struct {
 	OwnerID     int64
 	BotID       int64
 	BotUsername string
+	// BotDBID is 0 for the main bot (from .env), or the row id in the bots table for an
+	// additional, client-organization bot added from the Mini App.
+	BotDBID int64
 }
 
 // Bot handles updates and implements service.Notifier, service.SchedulerNotifier and service.TaskObserver.
@@ -71,7 +74,22 @@ func (b *Bot) Run(ctx context.Context) {
 	if err := b.api.SetMyCommandsForChat(ctx, b.cfg.OwnerID, ownerCommands); err != nil {
 		b.log.Warn("setMyCommands for owner failed", "err", err)
 	}
+	b.EnsureMenuButton(ctx)
 	b.api.Poll(ctx, b.handle)
+}
+
+// EnsureMenuButton points the persistent menu button (next to the message box, in every private
+// chat) at the Mini App, so users open it directly instead of hunting for a command or a button
+// buried in some message. Called on start and again whenever WebAppPublicURL changes.
+func (b *Bot) EnsureMenuButton(ctx context.Context) {
+	url := b.settings.Get().WebAppPublicURL
+	if url == "" {
+		return
+	}
+	mb := &telegram.MenuButton{Type: "web_app", Text: "Открыть панель", WebApp: &telegram.WebAppInfo{URL: url}}
+	if err := b.api.SetChatMenuButton(ctx, 0, mb); err != nil {
+		b.log.Warn("setChatMenuButton failed", "err", err)
+	}
 }
 
 func (b *Bot) handle(ctx context.Context, u telegram.Update) {

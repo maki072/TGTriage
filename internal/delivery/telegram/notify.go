@@ -46,8 +46,11 @@ func (b *Bot) TaskChanged(ctx context.Context, t *domain.Task) {
 // AnalysisFailed implements service.Notifier.
 func (b *Bot) AnalysisFailed(ctx context.Context, rec *domain.AnalysisRecord, contactName string) {
 	where := ""
-	if rec.ConnectionID == domain.HelpdeskConnectionID {
+	if domain.IsHelpdeskConnection(rec.ConnectionID) {
 		where = " (хелпдеск)"
+		if id := domain.ParseHelpdeskBotID(rec.ConnectionID); id != 0 {
+			where = fmt.Sprintf(" (хелпдеск, доп. бот #%d)", id)
+		}
 	}
 	text := fmt.Sprintf("⚠️ <b>Не удалось проанализировать сообщения</b> от %s%s\n\n"+
 		"🤖 %s · <code>%s</code>\n<code>%s</code>\n\n💬 <blockquote expandable>%s</blockquote>",

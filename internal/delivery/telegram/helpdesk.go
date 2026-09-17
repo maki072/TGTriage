@@ -223,7 +223,7 @@ func (b *Bot) onMyChatMember(ctx context.Context, u *telegram.ChatMemberUpdated)
 		if err := b.helpdesk.OnUserBlocked(ctx, u.Chat.ID, blocked); err != nil {
 			b.log.Warn("sync blocked user", "err", err)
 		}
-	case u.Chat.ID == b.settings.Get().Helpdesk.GroupID:
+	case u.Chat.ID == b.helpdesk.ConfiguredGroupID():
 		if !u.NewChatMember.InChat() {
 			_ = b.sendText(ctx, "⚠️ <b>Бота удалили из группы хелпдеска</b> — сообщения пользователей больше не доставляются операторам.", nil)
 		} else if u.NewChatMember.Status == "member" {
@@ -254,7 +254,7 @@ func (b *Bot) offerHelpdeskGroup(ctx context.Context, chatID int64, by *telegram
 		_ = b.sendText(ctx, sb.String(), nil)
 		return
 	}
-	if chat.ID == b.settings.Get().Helpdesk.GroupID {
+	if chat.ID == b.helpdesk.ConfiguredGroupID() {
 		return
 	}
 	if !chat.IsForum {
@@ -274,8 +274,8 @@ func (b *Bot) useHelpdeskGroup(ctx context.Context, ref *msgRef, groupID int64, 
 	if groupID >= 0 {
 		return domain.ErrInvalidInput
 	}
-	if _, err := b.settings.Update(ctx, func(s *domain.Settings) {
-		s.Helpdesk.GroupID, s.Helpdesk.Enabled = groupID, true
+	if err := b.helpdesk.UpdateConfig(ctx, func(h *domain.HelpdeskSettings) {
+		h.GroupID, h.Enabled = groupID, true
 	}); err != nil {
 		return err
 	}

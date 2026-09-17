@@ -22,6 +22,7 @@ type Store struct {
 	Settings    *SettingsRepo
 	Connections *ConnectionRepo
 	Helpdesk    *HelpdeskRepo
+	Bots        *BotRepo
 }
 
 // Open opens (and creates if needed) the database, applies pragmas and migrations.
@@ -61,6 +62,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		Settings:    &SettingsRepo{db: db},
 		Connections: &ConnectionRepo{db: db},
 		Helpdesk:    &HelpdeskRepo{db: db},
+		Bots:        &BotRepo{db: db},
 	}, nil
 }
 
@@ -211,6 +213,68 @@ var migrations = [][]string{
 		`ALTER TABLE tasks ADD COLUMN merged_into INTEGER NOT NULL DEFAULT 0`,
 		`CREATE INDEX idx_tasks_remind_at ON tasks (remind_at)`,
 		`CREATE INDEX idx_tasks_personal_nudge ON tasks (status, connection_id, last_reminded_at)`,
+	},
+	// v4: multi-bot — additional bots' tasks/messages/analyses keep using the shared tables,
+	// disambiguated by connection_id "helpdesk:<bot_id>"; only hd_users/hd_messages need a real
+	// bot_id column, since the same Telegram user id can write to several bots.
+	{
+		`CREATE TABLE bots (
+			id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+			token                TEXT NOT NULL UNIQUE,
+			username             TEXT NOT NULL DEFAULT '',
+			label                TEXT NOT NULL DEFAULT '',
+			active               INTEGER NOT NULL DEFAULT 1,
+			sensitivity          TEXT NOT NULL DEFAULT '',
+			ai_chain             TEXT NOT NULL DEFAULT '[]',
+			hd_enabled           INTEGER NOT NULL DEFAULT 1,
+			hd_group_id          INTEGER NOT NULL DEFAULT 0,
+			hd_triage_enabled    INTEGER NOT NULL DEFAULT 1,
+			hd_about             TEXT NOT NULL DEFAULT '',
+			hd_greeting_enabled  INTEGER NOT NULL DEFAULT 0,
+			hd_greeting_text     TEXT NOT NULL DEFAULT '',
+			hd_autoreply_enabled INTEGER NOT NULL DEFAULT 0,
+			hd_autoreply_text    TEXT NOT NULL DEFAULT '',
+			hd_hours_enabled     INTEGER NOT NULL DEFAULT 0,
+			hd_hours_start       TEXT NOT NULL DEFAULT '',
+			hd_hours_end         TEXT NOT NULL DEFAULT '',
+			hd_hours_days        TEXT NOT NULL DEFAULT '',
+			hd_offhours_text     TEXT NOT NULL DEFAULT '',
+			hd_reminder_minutes  INTEGER NOT NULL DEFAULT 0,
+			created_at           INTEGER NOT NULL,
+			updated_at           INTEGER NOT NULL
+		)`,
+		`CREATE TABLE hd_users_new (
+			bot_id          INTEGER NOT NULL DEFAULT 0,
+			user_id         INTEGER NOT NULL,
+			name            TEXT NOT NULL DEFAULT '',
+			username        TEXT NOT NULL DEFAULT '',
+			language_code   TEXT NOT NULL DEFAULT '',
+			source          TEXT NOT NULL DEFAULT '',
+			group_id        INTEGER NOT NULL DEFAULT 0,
+			topic_id        INTEGER NOT NULL DEFAULT 0,
+			topic_closed    INTEGER NOT NULL DEFAULT 0,
+			blocked         INTEGER NOT NULL DEFAULT 0,
+			awaiting_since  INTEGER NOT NULL DEFAULT 0,
+			reminded_at     INTEGER NOT NULL DEFAULT 0,
+			last_message_at INTEGER NOT NULL DEFAULT 0,
+			created_at      INTEGER NOT NULL,
+			updated_at      INTEGER NOT NULL,
+			PRIMARY KEY (bot_id, user_id)
+		)`,
+		`INSERT INTO hd_users_new (bot_id, user_id, name, username, language_code, source, group_id, topic_id,
+			topic_closed, blocked, awaiting_since, reminded_at, last_message_at, created_at, updated_at)
+			SELECT 0, user_id, name, username, language_code, source, group_id, topic_id,
+				topic_closed, blocked, awaiting_since, reminded_at, last_message_at, created_at, updated_at
+			FROM hd_users`,
+		`DROP TABLE hd_users`,
+		`ALTER TABLE hd_users_new RENAME TO hd_users`,
+		`CREATE INDEX idx_hd_users_topic ON hd_users (bot_id, group_id, topic_id)`,
+		`CREATE INDEX idx_hd_users_awaiting ON hd_users (bot_id, awaiting_since)`,
+		`ALTER TABLE hd_messages ADD COLUMN bot_id INTEGER NOT NULL DEFAULT 0`,
+		`DROP INDEX idx_hd_messages_user`,
+		`DROP INDEX idx_hd_messages_group`,
+		`CREATE INDEX idx_hd_messages_user ON hd_messages (bot_id, user_id, user_msg_id)`,
+		`CREATE INDEX idx_hd_messages_group ON hd_messages (bot_id, group_id, group_msg_id)`,
 	},
 }
 

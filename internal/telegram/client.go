@@ -260,6 +260,16 @@ func (c *Client) SetMyCommandsForChat(ctx context.Context, chatID int64, cmds []
 	}, nil)
 }
 
+// SetChatMenuButton sets the persistent button next to the message box. chatID 0 sets the default
+// for all private chats with the bot that don't have their own chat-specific button.
+func (c *Client) SetChatMenuButton(ctx context.Context, chatID int64, mb *MenuButton) error {
+	params := map[string]any{"menu_button": mb}
+	if chatID != 0 {
+		params["chat_id"] = chatID
+	}
+	return c.call(ctx, c.http, "setChatMenuButton", params, nil)
+}
+
 func (c *Client) CreateForumTopic(ctx context.Context, chatID int64, name string) (*ForumTopic, error) {
 	var t ForumTopic
 	if err := c.call(ctx, c.http, "createForumTopic", map[string]any{"chat_id": chatID, "name": name}, &t); err != nil {

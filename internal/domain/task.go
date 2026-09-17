@@ -158,8 +158,8 @@ func (t *Task) IsOverdue(now time.Time) bool {
 	return t.Deadline != nil && t.Status.IsOpen() && t.Deadline.Before(now)
 }
 
-// IsHelpdesk reports whether the task is a support desk ticket.
-func (t *Task) IsHelpdesk() bool { return t.ConnectionID == HelpdeskConnectionID }
+// IsHelpdesk reports whether the task is a support desk ticket (main bot or an additional one).
+func (t *Task) IsHelpdesk() bool { return IsHelpdeskConnection(t.ConnectionID) }
 
 // TaskScope narrows tasks to support desk tickets or the owner's personal tasks.
 type TaskScope string
@@ -185,6 +185,9 @@ type TaskFilter struct {
 	Priorities []Priority   // empty = any
 	Scope      TaskScope
 	ChatID     int64 // 0 = any
-	Limit      int
-	Offset     int
+	// ConnectionID, when set, narrows the list to one exact connection_id (typically computed via
+	// HelpdeskConnectionFor to filter the Mini App's task list down to a single bot).
+	ConnectionID string
+	Limit        int
+	Offset       int
 }

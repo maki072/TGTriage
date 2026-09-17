@@ -144,7 +144,8 @@ func newHelpdeskFixture(t *testing.T, env map[string]string) *helpdeskFixture {
 	}
 	settings := newTestSettings(t, newMemSettingsRepo(), base)
 	tr := newFakeTransport()
-	svc := NewHelpdeskService(store.Helpdesk, store.Messages, settings, tr, 1, testBotID, slog.New(slog.DiscardHandler))
+	svc := NewHelpdeskService(store.Helpdesk, store.Messages, settings, GlobalHelpdeskConfig(settings), tr, 1, testBotID, 0,
+		slog.New(slog.DiscardHandler))
 	return &helpdeskFixture{svc: svc, tr: tr, store: store, settings: settings}
 }
 
@@ -197,7 +198,7 @@ func TestOperatorReplyRelaysAndClearsAwaiting(t *testing.T) {
 	fx.userSays(t, 10, "Не работает оплата")
 	u, _ := fx.svc.User(ctx, 42)
 	copyID := 0
-	if m, err := fx.store.Helpdesk.MessageByUserMsg(ctx, 42, 10); err == nil {
+	if m, err := fx.store.Helpdesk.MessageByUserMsg(ctx, 0, 42, 10); err == nil {
 		copyID = m.GroupMsgID
 	}
 
@@ -223,7 +224,7 @@ func TestOperatorReplyRelaysAndClearsAwaiting(t *testing.T) {
 	}
 
 	// the user replies to the operator's copy: the topic copy must reply to the operator's message
-	outCopy, _ := fx.store.Helpdesk.MessageByGroupMsg(ctx, testGroup, 301)
+	outCopy, _ := fx.store.Helpdesk.MessageByGroupMsg(ctx, 0, testGroup, 301)
 	if err := fx.svc.OnUserMessage(ctx, UserMessage{UserID: 42, Name: "Иван", Username: "ivan", MessageID: 12,
 		ReplyToID: outCopy.UserMsgID, Text: "Спасибо", Date: time.Now()}); err != nil {
 		t.Fatal(err)

@@ -140,6 +140,23 @@ type HelpdeskSettings struct {
 	ReminderMinutes  int    // 0 = no reminders about unanswered users
 }
 
+// DefaultHelpdeskSettings mirrors the built-in defaults of the "helpdesk.*" setting fields
+// (internal/service/settings_fields.go) — used to seed a newly added bot's own support desk.
+func DefaultHelpdeskSettings() HelpdeskSettings {
+	return HelpdeskSettings{
+		Enabled:         true,
+		TriageEnabled:   true,
+		GreetingEnabled: true,
+		GreetingText:    "Здравствуйте! Напишите ваш вопрос одним или несколькими сообщениями — мы ответим прямо здесь.",
+		AutoReplyText:   "Спасибо, сообщение получено. Оператор ответит в ближайшее время.",
+		HoursStart:      "09:00",
+		HoursEnd:        "18:00",
+		HoursDays:       "12345",
+		OffHoursText:    "Сейчас нерабочее время. Сообщение получено, ответим в рабочие часы: {hours}.",
+		ReminderMinutes: 15,
+	}
+}
+
 // Active reports whether the desk is switched on and has a group to work in.
 func (h HelpdeskSettings) Active() bool { return h.Enabled && h.GroupID != 0 }
 

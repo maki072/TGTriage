@@ -24,14 +24,15 @@ type Notifier interface {
 // TriageService aggregates incoming messages (debounce), analyzes them with the LLM chain
 // and turns actionable requests into tasks. Every tunable comes from the runtime settings.
 type TriageService struct {
-	messages domain.MessageRepository
-	tasks    domain.TaskRepository
-	analyses domain.AnalysisRepository
-	conns    *ConnectionService
-	settings *SettingsService
-	registry *ai.Registry
-	notifier Notifier
-	log      *slog.Logger
+	messages  domain.MessageRepository
+	tasks     domain.TaskRepository
+	analyses  domain.AnalysisRepository
+	conns     *ConnectionService
+	settings  *SettingsService
+	bots      *BotService // additional bots, for their Sensitivity/AIChain/Helpdesk overrides; nil-safe
+	registry  *ai.Registry
+	notifiers *BotRegistry[Notifier]
+	log       *slog.Logger
 
 	mu        sync.Mutex
 	buffers   map[chatKey]*buffer
@@ -64,16 +65,23 @@ type batch struct {
 }
 
 func NewTriageService(messages domain.MessageRepository, tasks domain.TaskRepository, analyses domain.AnalysisRepository,
-	conns *ConnectionService, settings *SettingsService, registry *ai.Registry, notifier Notifier, log *slog.Logger) *TriageService {
+	conns *ConnectionService, settings *SettingsService, bots *BotService, registry *ai.Registry, notifier Notifier,
+	log *slog.Logger) *TriageService {
 	return &TriageService{
 		messages: messages, tasks: tasks, analyses: analyses, conns: conns,
-		settings: settings, registry: registry, notifier: notifier, log: log.With("component", "triage"),
+		settings: settings, bots: bots, registry: registry, notifiers: NewBotRegistry(notifier),
+		log:       log.With("component", "triage"),
 		buffers:   map[chatKey]*buffer{},
 		chatLocks: map[chatKey]*sync.Mutex{},
 		queue:     make(chan batch, 256),
 		baseCtx:   context.Background(),
 	}
 }
+
+// RegisterNotifier and UnregisterNotifier let the bot runtime manager plug an additional bot's
+// delivery.Bot in and out as it starts and stops, without a restart.
+func (s *TriageService) RegisterNotifier(botID int64, n Notifier) { s.notifiers.Set(botID, n) }
+func (s *TriageService) UnregisterNotifier(botID int64)           { s.notifiers.Unset(botID) }
 
 func (s *TriageService) callTimeout() time.Duration {
 	if n := s.settings.Get().AITimeoutSec; n > 0 {
@@ -133,8 +141,8 @@ func (s *TriageService) Wait(timeout time.Duration) bool {
 func (s *TriageService) OnIncoming(ctx context.Context, m *domain.Message) error {
 	st := s.settings.Get()
 	paused := st.TriagePaused
-	if m.ConnectionID == domain.HelpdeskConnectionID {
-		paused = !st.Helpdesk.TriageEnabled
+	if domain.IsHelpdeskConnection(m.ConnectionID) {
+		paused = !s.helpdeskTriageEnabled(m.ConnectionID, st)
 	}
 	m.Outgoing = false
 	m.Analyzed = paused
@@ -302,15 +310,20 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	if st.NoisePrefilter && isHeuristicNoise(live) {
 		return s.recordHeuristicNoise(ctx, b, live)
 	}
+	helpdesk := domain.IsHelpdeskConnection(b.key.connID)
+	var helpdeskConnID string
+	if helpdesk {
+		s.applyBotOverrides(b.key.connID, &st)
+		helpdeskConnID = b.key.connID
+	}
 	if len(st.AIChain) == 0 {
 		return domain.ErrProviderUnset // messages stay unanalyzed and are picked up again on restart
 	}
 
-	helpdesk := b.key.connID == domain.HelpdeskConnectionID
 	scope, about := domain.ScopePersonal, st.OwnerAbout
 	var ownerName string
 	if helpdesk {
-		scope, about = domain.ScopeHelpdesk, helpdeskAbout(st)
+		scope, about = domain.ScopeHelpdesk, helpdeskAbout(st.Helpdesk.About, st.OwnerAbout)
 	} else if conn, err := s.conns.Get(ctx, b.key.connID); err == nil {
 		ownerName = conn.UserName
 	}
@@ -319,10 +332,11 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 		return err
 	}
 	openTasks, _, err := s.tasks.List(ctx, domain.TaskFilter{
-		Statuses: []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed},
-		Scope:    scope,
-		ChatID:   b.key.chatID,
-		Limit:    10,
+		Statuses:     []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed},
+		Scope:        scope,
+		ConnectionID: helpdeskConnID, // narrows to this exact bot: two orgs' bots can share a chat_id
+		ChatID:       b.key.chatID,
+		Limit:        10,
 	})
 	if err != nil {
 		return err
@@ -370,7 +384,11 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 		if merr := s.messages.MarkAnalyzed(ctx, b.ids, rec.ID); merr != nil {
 			return errors.Join(err, merr)
 		}
-		s.notifier.AnalysisFailed(ctx, rec, first.SenderName)
+		// System alerts always go to the owner via the main bot: they aren't expected to have
+		// personally started every client bot just to receive them.
+		if n, ok := s.notifiers.For(0); ok {
+			n.AnalysisFailed(ctx, rec, first.SenderName)
+		}
 		return err
 	}
 	analysis := res.Analysis
@@ -396,7 +414,10 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 
 	if analysis.UpdateTaskID > 0 {
 		t, err := s.tasks.Get(ctx, analysis.UpdateTaskID)
-		if err == nil && t.ChatID == b.key.chatID && t.IsHelpdesk() == helpdesk && t.Status.IsOpen() {
+		// The connection_id check (helpdesk only) keeps two organizations' bots from merging into
+		// each other's ticket when the same Telegram user happens to write to both.
+		sameBot := !helpdesk || t.ConnectionID == b.key.connID
+		if err == nil && t.ChatID == b.key.chatID && t.IsHelpdesk() == helpdesk && sameBot && t.Status.IsOpen() {
 			s.merge(t, analysis, live)
 			if err := s.tasks.Update(ctx, t); err != nil {
 				return err
@@ -404,7 +425,7 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 			if err := s.analyses.SetTaskID(ctx, rec.ID, t.ID); err != nil {
 				log.Warn("link analysis to task", "err", err)
 			}
-			s.notifier.TaskUpdated(ctx, t)
+			s.notifyTask(ctx, t, false)
 			return nil
 		}
 		log.Warn("model referenced unknown or foreign task, creating a new one", "task_id", analysis.UpdateTaskID)
@@ -437,8 +458,25 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	if err := s.analyses.SetTaskID(ctx, rec.ID, t.ID); err != nil {
 		log.Warn("link analysis to task", "err", err)
 	}
-	s.notifier.TaskCreated(ctx, t)
+	s.notifyTask(ctx, t, true)
 	return nil
+}
+
+// notifyTask calls TaskCreated/TaskUpdated on the Notifier of the bot t belongs to (the main bot
+// for a personal task or a helpdesk ticket of connection_id "helpdesk"). If that bot's runtime
+// isn't live (e.g. just deactivated), the task is still saved — it's simply not announced.
+func (s *TriageService) notifyTask(ctx context.Context, t *domain.Task, created bool) {
+	botID := domain.ParseHelpdeskBotID(t.ConnectionID)
+	n, ok := s.notifiers.For(botID)
+	if !ok {
+		s.log.Warn("no live notifier for task's bot, skipping announcement", "task_id", t.ID, "bot_id", botID)
+		return
+	}
+	if created {
+		n.TaskCreated(ctx, t)
+	} else {
+		n.TaskUpdated(ctx, t)
+	}
 }
 
 // CreateHelpdeskTicket turns messages an operator picked (/1, a forward, the Mini App button) into a
@@ -448,21 +486,23 @@ func (s *TriageService) CreateHelpdeskTicket(ctx context.Context, u *domain.Help
 		return nil, fmt.Errorf("%w: нет сообщений для тикета", domain.ErrInvalidInput)
 	}
 	st := s.settings.Get()
+	connID := domain.HelpdeskConnectionFor(u.BotID)
+	s.applyBotOverrides(connID, &st)
 	loc := s.settings.Location()
-	log := s.log.With("helpdesk_user", u.UserID, "messages", len(msgs))
+	log := s.log.With("helpdesk_user", u.UserID, "bot_id", u.BotID, "messages", len(msgs))
 	for i := range msgs {
 		if !msgs[i].Outgoing {
 			msgs[i].SenderName, msgs[i].SenderUsername = u.Name, u.Username
 		}
 	}
-	rec := &domain.AnalysisRecord{ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, InputText: forwardedText(msgs)}
+	rec := &domain.AnalysisRecord{ConnectionID: connID, ChatID: u.UserID, InputText: forwardedText(msgs)}
 	for _, m := range msgs {
 		if m.ID > 0 {
 			rec.MessageRowIDs = append(rec.MessageRowIDs, m.ID)
 		}
 	}
 	t := &domain.Task{
-		ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, SenderID: u.UserID,
+		ConnectionID: connID, ChatID: u.UserID, SenderID: u.UserID,
 		SenderName: u.Name, SenderUsername: u.Username, SourceText: rec.InputText,
 		Priority: domain.PriorityMedium, Category: domain.CategoryOther, Status: domain.StatusNew,
 		Title: fallbackTitle(msgs[0].Text), Confidence: 1,
@@ -474,7 +514,7 @@ func (s *TriageService) CreateHelpdeskTicket(ctx context.Context, u *domain.Help
 	}
 
 	if len(st.AIChain) > 0 {
-		in := ai.ForwardInput{OwnerAbout: helpdeskAbout(st), Now: time.Now(), Location: loc, Messages: msgs, Helpdesk: true}
+		in := ai.ForwardInput{OwnerAbout: helpdeskAbout(st.Helpdesk.About, st.OwnerAbout), Now: time.Now(), Location: loc, Messages: msgs, Helpdesk: true}
 		req := ai.Request{System: ai.ForwardSystemPrompt(in), User: ai.ForwardUserPrompt(in), Schema: ai.AnalysisSchema()}
 		started := time.Now()
 		res, err := s.completeChain(ctx, st, req, log)
@@ -517,7 +557,7 @@ func (s *TriageService) CreateHelpdeskTicket(ctx context.Context, u *domain.Help
 		}
 	}
 	log.Info("helpdesk ticket created by operator", "task_id", t.ID, "provider", t.Provider)
-	s.notifier.TaskCreated(ctx, t)
+	s.notifyTask(ctx, t, true)
 	return t, nil
 }
 
@@ -729,11 +769,47 @@ func (s *TriageService) probeEntry(ctx context.Context, i int, entry domain.AIKe
 }
 
 // helpdeskAbout describes the support desk for the LLM; the owner description stands in when it is empty.
-func helpdeskAbout(st domain.Settings) string {
-	if strings.TrimSpace(st.Helpdesk.About) != "" {
-		return st.Helpdesk.About
+func helpdeskAbout(about, ownerAbout string) string {
+	if strings.TrimSpace(about) != "" {
+		return about
 	}
-	return st.OwnerAbout
+	return ownerAbout
+}
+
+// helpdeskTriageEnabled reports whether automatic ticket triage is on for a helpdesk connection:
+// the main bot's global Settings.Helpdesk for connID "helpdesk", an additional bot's own Helpdesk
+// config for "helpdesk:<id>".
+func (s *TriageService) helpdeskTriageEnabled(connID string, st domain.Settings) bool {
+	if b, ok := s.helpdeskBot(connID); ok {
+		return b.Helpdesk.TriageEnabled
+	}
+	return st.Helpdesk.TriageEnabled
+}
+
+// helpdeskBot returns the additional bot a helpdesk connection belongs to (ok=false for the main
+// bot or a non-helpdesk connection, or when that bot isn't known — s.bots may be nil in tests).
+func (s *TriageService) helpdeskBot(connID string) (domain.Bot, bool) {
+	if s.bots == nil {
+		return domain.Bot{}, false
+	}
+	id := domain.ParseHelpdeskBotID(connID)
+	if id == 0 {
+		return domain.Bot{}, false
+	}
+	return s.bots.Get(id)
+}
+
+// applyBotOverrides adjusts a per-batch Settings snapshot with an additional bot's own helpdesk
+// identity (about text, hours...) and its Sensitivity/AIChain overrides. The main bot (connID
+// "helpdesk") is left untouched — st already reflects it.
+func (s *TriageService) applyBotOverrides(connID string, st *domain.Settings) {
+	b, ok := s.helpdeskBot(connID)
+	if !ok {
+		return
+	}
+	st.Helpdesk = b.Helpdesk
+	st.Sensitivity = b.EffectiveSensitivity(st.Sensitivity)
+	st.AIChain = b.EffectiveAIChain(st.AIChain)
 }
 
 func batchText(msgs []domain.Message) string {

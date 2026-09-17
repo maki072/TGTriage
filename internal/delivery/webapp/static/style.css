@@ -276,6 +276,12 @@ textarea.input { min-height: 80px; resize: vertical; }
 .chain-line .icon-btn:disabled { opacity: .35; }
 .chain-line .icon-btn.danger { color: var(--danger); }
 input.input.chain-key { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+
+/* ---- bots ---- */
+.bot-row { padding: 10px 12px; }
+.bot-line { display: flex; align-items: center; gap: 8px; }
+.bot-line .bot-label { flex: 1; min-width: 0; font-weight: 600; }
+
 .probe { margin: 0 0 8px; font-size: 13px; word-break: break-word; }
 .probe:last-child { margin-bottom: 0; }
 .probe.bad b, .probe.bad { color: var(--danger); }

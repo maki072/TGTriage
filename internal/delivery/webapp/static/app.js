@@ -65,12 +65,13 @@ const state = {
   tab: null,
   view: null,            // {type: 'task'|'user', id}
   back: [],              // view stack
-  tasksFilter: { status: 'act', priority: 'all', scope: 'all', offset: 0 },
-  historyFilter: { status: 'done', priority: 'all', scope: 'all', offset: 0 },
-  dialogsFilter: { filter: 'awaiting', q: '', offset: 0 },
+  tasksFilter: { status: 'act', priority: 'all', scope: 'all', bot: 'all', offset: 0 },
+  historyFilter: { status: 'done', priority: 'all', scope: 'all', bot: 'all', offset: 0 },
+  dialogsFilter: { filter: 'awaiting', q: '', bot: 'all', offset: 0 },
   settings: null,
   chainDraft: null,
   chainDirty: false,
+  bots: [],               // additional bots (owner only) — [] means none configured
   openGroups: new Set(['helpdesk']),
 };
 
@@ -128,7 +129,7 @@ function render() {
   if (tg && tg.BackButton) { if (detail) tg.BackButton.show(); else tg.BackButton.hide(); }
   if (detail) {
     if (state.view.type === 'task') { topTitle.textContent = 'Задача #' + state.view.id; renderTaskDetail(state.view.id); }
-    else { topTitle.textContent = 'Диалог'; renderDialog(state.view.id); }
+    else { topTitle.textContent = 'Диалог'; renderDialog(state.view.id, state.view.bot); }
     return;
   }
   switch (state.tab) {
@@ -219,6 +220,20 @@ async function withBusy(btn, fn) {
   finally { if (btn) btn.disabled = false; }
 }
 
+async function loadBots() {
+  if (!isOwner()) return state.bots;
+  try { state.bots = (await api('GET', '/api/bots')).items || []; } catch (e) { /* non-fatal */ }
+  return state.bots;
+}
+
+// botChips returns the ?bot= filter chips — only meaningful (and only shown) once at least one
+// additional bot exists, so a single-bot setup stays exactly as compact as before.
+function botChips() {
+  const opts = [['all', 'Все боты'], ['0', '🏠 Основной']];
+  state.bots.forEach(b => opts.push([String(b.id), (b.active ? '' : '⏸ ') + (b.label || ('#' + b.id))]));
+  return opts;
+}
+
 function chipRow(name, options, active) {
   return `<div class="chiprow" data-chips="${name}">` +
     options.map(([v, label]) => `<button class="chip${v === active ? ' active' : ''}" data-value="${esc(v)}">${esc(label)}</button>`).join('') +
@@ -241,14 +256,17 @@ async function renderDialogs() {
     if (b) b.addEventListener('click', () => { state.openGroups.add('helpdesk'); switchTab('settings'); });
     return;
   }
-  app.innerHTML = chipRow('dfilter', [['awaiting', '⏳ Ждут ответа'], ['all', 'Все']], f.filter) +
+  const showBotFilter = isOwner() && state.bots.length > 0;
+  app.innerHTML = (showBotFilter ? chipRow('bot', botChips(), f.bot) : '') +
+    chipRow('dfilter', [['awaiting', '⏳ Ждут ответа'], ['all', 'Все']], f.filter) +
     `<input class="input search" id="dq" type="search" placeholder="Поиск по имени, @username или ID" value="${esc(f.q)}">` +
     `<div id="listBody" class="loading">Загрузка…</div>`;
+  if (showBotFilter) wireChips('bot', v => { f.bot = v; f.offset = 0; renderDialogs(); });
   wireChips('dfilter', v => { f.filter = v; f.offset = 0; renderDialogs(); });
   const q = document.getElementById('dq');
   q.addEventListener('change', () => { f.q = q.value.trim(); f.offset = 0; renderDialogs(); });
   try {
-    const data = await api('GET', `/api/helpdesk/users?filter=${f.filter}&q=${encodeURIComponent(f.q)}&limit=${PAGE_SIZE}&offset=${f.offset}`);
+    const data = await api('GET', `/api/helpdesk/users?filter=${f.filter}&q=${encodeURIComponent(f.q)}&bot=${f.bot}&limit=${PAGE_SIZE}&offset=${f.offset}`);
     const body = document.getElementById('listBody');
     body.classList.remove('loading');
     if (!data.items.length) {
@@ -256,7 +274,8 @@ async function renderDialogs() {
       return;
     }
     body.innerHTML = data.items.map(dialogCard).join('') + pager(data, 'dpage');
-    body.querySelectorAll('[data-user]').forEach(el => el.addEventListener('click', () => openView({ type: 'user', id: Number(el.dataset.user) })));
+    body.querySelectorAll('[data-user]').forEach(el => el.addEventListener('click', () =>
+      openView({ type: 'user', id: Number(el.dataset.user), bot: Number(el.dataset.bot || 0) })));
     body.querySelectorAll('[data-dpage]').forEach(el => el.addEventListener('click', () => { f.offset = Number(el.dataset.dpage); renderDialogs(); }));
   } catch (e) {
     document.getElementById('listBody').innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`;
@@ -272,19 +291,26 @@ function userBadges(u) {
   return b.join(' ');
 }
 
+function botLabelFor(botID) {
+  if (!botID) return '';
+  const b = state.bots.find(x => x.id === botID);
+  return b ? (b.label || ('#' + b.id)) : ('#' + botID);
+}
+
 function dialogCard(u) {
-  return `<div class="card task-card" data-user="${u.user_id}">
+  const botTag = state.bots.length ? ` <span class="muted small">· ${esc(botLabelFor(u.bot_id) || '🏠')}</span>` : '';
+  return `<div class="card task-card" data-user="${u.user_id}" data-bot="${u.bot_id}">
     <div class="task-top"><span class="avatar">${esc((u.name || '?').slice(0, 1).toUpperCase())}</span>
-      <span class="task-title">${esc(u.name || ('id' + u.user_id))}${u.username ? ` <span class="muted">@${esc(u.username)}</span>` : ''}</span>
+      <span class="task-title">${esc(u.name || ('id' + u.user_id))}${u.username ? ` <span class="muted">@${esc(u.username)}</span>` : ''}${botTag}</span>
       <span class="muted small">${fmtDT(u.last_message_at)}</span></div>
     <div class="task-meta">${userBadges(u)}</div>
   </div>`;
 }
 
-async function renderDialog(userID) {
+async function renderDialog(userID, botID) {
   app.innerHTML = `<div class="loading">Загрузка…</div>`;
   let d;
-  try { d = await api('GET', `/api/helpdesk/users/${userID}`); }
+  try { d = await api('GET', `/api/helpdesk/users/${userID}?bot=${botID || 0}`); }
   catch (e) { app.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`; return; }
   const u = d.user;
   topTitle.textContent = u.name || 'Диалог';
@@ -313,13 +339,13 @@ async function renderDialog(userID) {
   app.querySelectorAll('[data-link]').forEach(el => el.addEventListener('click', e => { e.preventDefault(); openLink(el.dataset.link); }));
   app.querySelectorAll('[data-open-task]').forEach(el => el.addEventListener('click', () => openView({ type: 'task', id: Number(el.dataset.openTask) })));
   document.getElementById('topicToggle').addEventListener('click', e => withBusy(e.target, async () => {
-    await api('POST', `/api/helpdesk/users/${userID}/topic`, { closed: !u.topic_closed });
+    await api('POST', `/api/helpdesk/users/${userID}/topic?bot=${botID || 0}`, { closed: !u.topic_closed });
     toast(u.topic_closed ? '🔓 Тема открыта' : '🔒 Тема закрыта');
-    renderDialog(userID);
+    renderDialog(userID, botID);
   }));
   document.getElementById('makeTicket').addEventListener('click', e => withBusy(e.target, async () => {
     toast('⏳ Оформляю тикет…');
-    const t = await api('POST', `/api/helpdesk/users/${userID}/ticket`);
+    const t = await api('POST', `/api/helpdesk/users/${userID}/ticket?bot=${botID || 0}`);
     toast('🎫 Тикет #' + t.id + ' создан');
     openView({ type: 'task', id: t.id });
   }));
@@ -327,9 +353,9 @@ async function renderDialog(userID) {
     const text = document.getElementById('hdReply').value.trim();
     if (!text) { toast('Введите текст', true); return; }
     withBusy(e.target, async () => {
-      await api('POST', `/api/helpdesk/users/${userID}/reply`, { text });
+      await api('POST', `/api/helpdesk/users/${userID}/reply?bot=${botID || 0}`, { text });
       toast('📤 Отправлено');
-      renderDialog(userID);
+      renderDialog(userID, botID);
     });
   });
 }
@@ -354,21 +380,24 @@ async function renderTaskList(tab) {
 
   let overviewHtml = '';
   if (tab === 'tasks') {
-    try { overviewHtml = renderOverview(await api('GET', `/api/overview?scope=${scope}`)); } catch (e) { /* non-fatal */ }
+    try { overviewHtml = renderOverview(await api('GET', `/api/overview?scope=${scope}&bot=${filter.bot}`)); } catch (e) { /* non-fatal */ }
   }
+  const showBotFilter = isOwner() && state.bots.length > 0;
   app.innerHTML = overviewHtml +
     (isOwner() ? chipRow('scope', SCOPE_CHIPS, filter.scope) : '') +
+    (showBotFilter ? chipRow('bot', botChips(), filter.bot) : '') +
     chipRow('sfilter', chips, filter.status) +
     chipRow('pfilter', PRIO_CHIPS, filter.priority) +
     `<div id="listBody" class="loading">Загрузка…</div>`;
 
   wireChips('scope', v => { filter.scope = v; filter.offset = 0; renderTaskList(tab); });
+  if (showBotFilter) wireChips('bot', v => { filter.bot = v; filter.offset = 0; renderTaskList(tab); });
   wireChips('sfilter', v => { filter.status = v; filter.offset = 0; renderTaskList(tab); });
   wireChips('pfilter', v => { filter.priority = v; filter.offset = 0; renderTaskList(tab); });
   app.querySelectorAll('[data-go-dialogs]').forEach(el => el.addEventListener('click', () => switchTab('dialogs')));
 
   try {
-    const data = await api('GET', `/api/tasks?scope=${scope}&status=${filter.status}&priority=${filter.priority}&limit=${PAGE_SIZE}&offset=${filter.offset}`);
+    const data = await api('GET', `/api/tasks?scope=${scope}&bot=${filter.bot}&status=${filter.status}&priority=${filter.priority}&limit=${PAGE_SIZE}&offset=${filter.offset}`);
     const body = document.getElementById('listBody');
     body.classList.remove('loading');
     if (!data.items || data.items.length === 0) { body.innerHTML = `<div class="empty">Здесь пусто 🎉</div>`; return; }
@@ -400,6 +429,7 @@ function renderOverview(o) {
 
 function taskCard(t) {
   const meta = [`${t.helpdesk ? '🎫' : '👤'} ${esc(t.sender_name || '—')}`, CATEGORY_LABEL[t.category] || t.category];
+  if (t.helpdesk && state.bots.length) meta.push(esc(botLabelFor(t.bot_id) || '🏠'));
   if (t.status !== 'new' && t.status !== 'in_progress') meta.push(`<span class="badge status-${t.status}">${STATUS_LABEL[t.status] || t.status}</span>`);
   if (t.deadline) meta.push(`📅 ${fmtDT(t.deadline)}` + (t.overdue ? ` <span class="badge overdue">просрочено</span>` : ''));
   if (t.status === 'snoozed' && t.snooze_until) meta.push(`⏰ до ${fmtDT(t.snooze_until)}`);
@@ -515,7 +545,7 @@ async function handleTaskAction(t, action, btn) {
     case 'edit-open': return openEditBox(t);
     case 'remind-open': return openRemindBox(t);
     case 'merge-open': return openMergeBox(t);
-    case 'dialog': return openView({ type: 'user', id: t.chat_id });
+    case 'dialog': return openView({ type: 'user', id: t.chat_id, bot: t.bot_id });
   }
 }
 
@@ -716,6 +746,8 @@ function settingsHtml(s) {
       inner = aiChainHtml() + general.map(f => fieldHtml(s, f)).join('') +
         PROVIDERS.map(([p, label]) => `<details class="sub" data-group="ai-${p}" ${state.openGroups.has('ai-' + p) ? 'open' : ''}>
           <summary>${label}</summary>${s.fields.filter(f => f.key.startsWith(`ai.${p}_`)).map(f => fieldHtml(s, f)).join('')}</details>`).join('');
+    } else if (g.id === 'bots') {
+      inner = botsHtml();
     } else {
       inner = s.fields.filter(f => f.group === g.id).map(f => fieldHtml(s, f)).join('');
     }
@@ -740,6 +772,164 @@ function aiChainHtml() {
     <div class="actions"><button class="btn" id="chainAdd">＋ Добавить ключ</button><button class="btn primary" id="chainSave">💾 Сохранить</button></div>
     <button class="btn full" id="testProvider" style="margin-top:8px">🧪 Проверить все ключи</button>
     <div id="testResult"></div>`;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Bots (additional, per-organization support bots)                       */
+/* ---------------------------------------------------------------------- */
+
+const SENSITIVITY_OPTIONS = [['', 'Как в общих настройках'], ['low', 'Низкая'], ['medium', 'Средняя'], ['high', 'Высокая']];
+
+const BOT_HD_FIELDS = [
+  ['group_id', 'int', 'ID супергруппы', 'Супергруппа с включёнными темами, бот — админ с правом «Управление темами». ID вида -100…'],
+  ['triage_enabled', 'bool', 'Автоматические тикеты', 'LLM анализирует сообщения пользователей и заводит тикеты'],
+  ['about', 'text', 'О сервисе поддержки', 'Чем занимается эта организация — помогает модели отличать обращения от шума'],
+  ['greeting_enabled', 'bool', 'Приветствие на /start', ''],
+  ['greeting_text', 'text', 'Текст приветствия', ''],
+  ['autoreply_enabled', 'bool', 'Автоответ на обращение', 'Отправляется на первое сообщение, пока оператор не ответил'],
+  ['autoreply_text', 'text', 'Текст автоответа', ''],
+  ['hours_enabled', 'bool', 'Рабочие часы', 'Вне рабочих часов уходит отдельный автоответ'],
+  ['hours_start', 'time', 'Начало рабочего дня', ''],
+  ['hours_end', 'time', 'Конец рабочего дня', ''],
+  ['hours_days', 'days', 'Рабочие дни', ''],
+  ['offhours_text', 'text', 'Автоответ вне рабочих часов', '{hours} заменяется на рабочие часы'],
+  ['reminder_minutes', 'int', 'Напоминание о неотвеченных, мин', '0 — выключено'],
+];
+
+function botsHtml() {
+  const bots = state.bots;
+  return `<div class="hint-text">Отдельный бот и супергруппа на каждую организацию-клиента. Настройки ИИ ниже — общие на все боты; переопределить чувствительность можно у конкретного бота.</div>
+    ${bots.length ? bots.map(botRowHtml).join('') : `<div class="empty" style="padding:14px 0">Дополнительных ботов пока нет</div>`}
+    <div class="actions"><button class="btn primary full" id="botAddBtn">＋ Добавить бота</button></div>`;
+}
+
+function botRowHtml(b) {
+  const groupOk = !!b.helpdesk.group_id;
+  return `<div class="card bot-row" data-bot="${b.id}" style="margin-top:10px">
+    <div class="bot-line">
+      <input class="input bot-label" data-bot-field="label" value="${esc(b.label)}" placeholder="Название организации">
+      <button class="switch${b.active ? ' on' : ''}" data-bot-active title="включён / выключен"><span class="knob"></span></button>
+    </div>
+    <div class="task-meta" style="margin-top:6px">
+      ${b.username ? `<span class="muted small">@${esc(b.username)}</span>` : ''}
+      <span class="badge${groupOk ? '' : ' warn'}">${groupOk ? '✅ группа настроена' : '⚠️ группа не указана'}</span>
+    </div>
+    <details class="sub" ${state.openGroups.has('bot-' + b.id) ? 'open' : ''} data-bot-adv="${b.id}">
+      <summary>Отдельные настройки</summary>
+      <div class="setting-row"><div class="label">Чувствительность</div>
+        <select class="input narrow" data-bot-field="sensitivity">${SENSITIVITY_OPTIONS.map(([v, l]) => `<option value="${v}"${v === b.sensitivity ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+      ${BOT_HD_FIELDS.map(f => botFieldHtml(b, f)).join('')}
+      <div class="actions"><button class="btn danger" data-bot-del>🗑 Удалить бота</button></div>
+    </details>
+  </div>`;
+}
+
+function botFieldHtml(b, [key, kind, label, desc]) {
+  const v = b.helpdesk[key];
+  const lbl = `<div class="label">${esc(label)}</div>${desc ? `<div class="desc">${esc(desc)}</div>` : ''}`;
+  const attr = `data-bot-hd="${key}" data-kind="${kind}"`;
+  switch (kind) {
+    case 'bool':
+      return `<div class="setting-row"><div>${lbl}</div><button class="switch${v ? ' on' : ''}" ${attr}><span class="knob"></span></button></div>`;
+    case 'int':
+      return `<div class="setting-row"><div>${lbl}</div><input class="input narrow" type="number" ${attr} value="${esc(v)}"></div>`;
+    case 'time':
+      return `<div class="setting-row"><div>${lbl}</div><input class="input narrow" type="time" ${attr} value="${esc(v)}"></div>`;
+    case 'days': {
+      const names = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
+      return `<div class="setting-block">${lbl}<div class="chiprow days" ${attr}>${names.map((n, i) =>
+        `<button class="chip${(v || '').includes(String(i + 1)) ? ' active' : ''}" data-day="${i + 1}">${n}</button>`).join('')}</div></div>`;
+    }
+    default:
+      return `<div class="setting-block">${lbl}<textarea class="input" ${attr}>${esc(v)}</textarea></div>`;
+  }
+}
+
+async function patchBot(id, body, okMsg) {
+  try {
+    const b = await api('POST', `/api/bots/${id}`, body);
+    const idx = state.bots.findIndex(x => x.id === id);
+    if (idx >= 0) state.bots[idx] = b; else state.bots.push(b);
+    if (okMsg) toast(okMsg);
+  } catch (e) { toast(e.message, true); }
+  renderSettings();
+}
+
+function wireBots() {
+  const addBtn = document.getElementById('botAddBtn');
+  if (addBtn) addBtn.addEventListener('click', openAddBotModal);
+
+  app.querySelectorAll('.bot-row').forEach(row => {
+    const id = Number(row.dataset.bot);
+    const bot = state.bots.find(b => b.id === id);
+    if (!bot) return;
+
+    row.addEventListener('toggle', e => {
+      if (e.target.matches('[data-bot-adv]')) {
+        const key = 'bot-' + id;
+        if (e.target.open) state.openGroups.add(key); else state.openGroups.delete(key);
+      }
+    }, true);
+
+    row.querySelector('[data-bot-active]').addEventListener('click', () => patchBot(id, { active: !bot.active }));
+    row.querySelector('[data-bot-field="label"]').addEventListener('change', e => patchBot(id, { label: e.target.value.trim() }));
+    const sens = row.querySelector('[data-bot-field="sensitivity"]');
+    if (sens) sens.addEventListener('change', e => patchBot(id, { sensitivity: e.target.value }));
+    const delBtn = row.querySelector('[data-bot-del]');
+    if (delBtn) delBtn.addEventListener('click', async () => {
+      if (!await confirmModal('Удалить бота?', `«${bot.label}» перестанет отвечать. История его тикетов останется.`, 'Удалить', true)) return;
+      try {
+        await api('DELETE', `/api/bots/${id}`);
+        state.bots = state.bots.filter(b => b.id !== id);
+        toast('🗑 Бот удалён');
+        renderSettings();
+      } catch (e) { toast(e.message, true); }
+    });
+
+    row.querySelectorAll('[data-bot-hd]').forEach(el => {
+      const key = el.dataset.botHd;
+      switch (el.dataset.kind) {
+        case 'bool':
+          el.addEventListener('click', () => patchBot(id, { helpdesk: { [key]: !bot.helpdesk[key] } }));
+          break;
+        case 'days':
+          el.querySelectorAll('[data-day]').forEach(chip => chip.addEventListener('click', () => {
+            const day = chip.dataset.day;
+            const cur = bot.helpdesk[key] || '';
+            patchBot(id, { helpdesk: { [key]: cur.includes(day) ? cur.replace(day, '') : cur + day } });
+          }));
+          break;
+        case 'int':
+          el.addEventListener('change', () => patchBot(id, { helpdesk: { [key]: Number(el.value) } }));
+          break;
+        default:
+          el.addEventListener('change', () => patchBot(id, { helpdesk: { [key]: el.value } }));
+      }
+    });
+  });
+}
+
+function openAddBotModal() {
+  showModal(`<h3>Добавить бота</h3>
+    <p class="hint-text" style="margin:0 0 8px">Токен от @BotFather для нового, отдельного бота этой организации.</p>
+    <input class="input" id="addBotToken" placeholder="Токен бота" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <input class="input" id="addBotLabel" placeholder="Название организации (необязательно)" style="margin-top:8px">
+    <div class="actions"><button class="btn primary full" id="addBotOk">＋ Добавить</button>
+    <button class="btn ghost full" id="addBotCancel">Отмена</button></div>`, root => {
+    root.querySelector('#addBotCancel').addEventListener('click', closeModal);
+    root.querySelector('#addBotOk').addEventListener('click', e => {
+      const token = root.querySelector('#addBotToken').value.trim();
+      const label = root.querySelector('#addBotLabel').value.trim();
+      if (!token) { toast('Введите токен', true); return; }
+      withBusy(e.target, async () => {
+        const b = await api('POST', '/api/bots', { token, label });
+        state.bots.push(b);
+        closeModal();
+        toast('✅ Бот «' + (b.label || b.username) + '» добавлен');
+        renderSettings();
+      });
+    });
+  });
 }
 
 function restartMark(f) { return f.restart ? ' <span class="badge">после перезапуска</span>' : ''; }
@@ -850,6 +1040,8 @@ function wireSettings(s) {
       catch (err) { out.innerHTML = `<div class="empty">❌ ${esc(err.message)}</div>`; }
     });
   });
+
+  wireBots();
 
   document.getElementById('hdCheck').addEventListener('click', e => withBusy(e.target, async () => {
     const out = document.getElementById('hdCheckResult');
@@ -974,6 +1166,7 @@ function testResultHtml(r) {
     app.innerHTML = `<div class="card empty">⛔ ${esc(e.message)}</div>`;
     return;
   }
+  await loadBots();
   buildTabbar();
   const params = new URLSearchParams(location.search);
   const startParam = tg && tg.initDataUnsafe ? tg.initDataUnsafe.start_param : '';

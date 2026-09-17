@@ -12,6 +12,7 @@ const HelpdeskConnectionID = "helpdesk"
 // HelpdeskUser is someone who writes to the bot for support. Operators talk to them in a forum
 // topic of the helpdesk group; the user only ever sees the bot.
 type HelpdeskUser struct {
+	BotID         int64 // 0 = main bot; which bot this contact wrote to (see domain.Bot)
 	UserID        int64 // equals the private chat id with the bot
 	Name          string
 	Username      string
@@ -42,6 +43,7 @@ const (
 // HelpdeskMessage maps a message in the private chat to its copy in the topic.
 type HelpdeskMessage struct {
 	ID         int64
+	BotID      int64
 	UserID     int64
 	Direction  HelpdeskDirection
 	UserMsgID  int
@@ -67,20 +69,25 @@ type HelpdeskUserFilter struct {
 	Offset       int
 }
 
+// HelpdeskUserFilter.BotID (and the standalone botID parameters below) scope a shared store to one
+// bot's contacts: the same Telegram user can write to several bots as unrelated conversations.
+
 // HelpdeskRepository stores support desk users, message mappings and ticket cards.
 type HelpdeskRepository interface {
-	GetUser(ctx context.Context, userID int64) (*HelpdeskUser, error)
-	UserByTopic(ctx context.Context, groupID int64, topicID int) (*HelpdeskUser, error)
+	GetUser(ctx context.Context, botID, userID int64) (*HelpdeskUser, error)
+	UserByTopic(ctx context.Context, botID, groupID int64, topicID int) (*HelpdeskUser, error)
 	SaveUser(ctx context.Context, u *HelpdeskUser) error
-	ListUsers(ctx context.Context, f HelpdeskUserFilter) ([]HelpdeskUser, int, error)
+	// ListUsers lists contacts of one bot (botID != nil) or merged across every bot (nil — the
+	// owner's cross-organization dialogs view).
+	ListUsers(ctx context.Context, botID *int64, f HelpdeskUserFilter) ([]HelpdeskUser, int, error)
 	// DueReminders returns users waiting since before cutoff and not reminded after cutoff.
-	DueReminders(ctx context.Context, cutoff time.Time) ([]HelpdeskUser, error)
+	DueReminders(ctx context.Context, botID int64, cutoff time.Time) ([]HelpdeskUser, error)
 
 	SaveMessage(ctx context.Context, m *HelpdeskMessage) error
-	MessageByUserMsg(ctx context.Context, userID int64, userMsgID int) (*HelpdeskMessage, error)
-	MessageByGroupMsg(ctx context.Context, groupID int64, groupMsgID int) (*HelpdeskMessage, error)
+	MessageByUserMsg(ctx context.Context, botID, userID int64, userMsgID int) (*HelpdeskMessage, error)
+	MessageByGroupMsg(ctx context.Context, botID, groupID int64, groupMsgID int) (*HelpdeskMessage, error)
 	// MessagesAround returns incoming mappings created within ±window of t in the group.
-	MessagesAround(ctx context.Context, groupID int64, t time.Time, window time.Duration) ([]HelpdeskMessage, error)
+	MessagesAround(ctx context.Context, botID, groupID int64, t time.Time, window time.Duration) ([]HelpdeskMessage, error)
 	DeleteMessagesOlderThan(ctx context.Context, before time.Time) (int64, error)
 
 	SaveCard(ctx context.Context, c HelpdeskCard) error

@@ -127,7 +127,10 @@ func (s *TriageService) analyzeForwarded(ctx context.Context, msgs []domain.Mess
 	}
 	log.Info("task created from forwarded messages", "task_id", t.ID, "provider", rec.Provider,
 		"model", rec.Model, "latency_ms", rec.LatencyMs)
-	s.notifier.TaskCreated(ctx, t)
+	// Forwarding to the bot is always a personal, main-bot action — there's no per-org variant.
+	if n, ok := s.notifiers.For(0); ok {
+		n.TaskCreated(ctx, t)
+	}
 	return nil
 }
 
@@ -137,7 +140,9 @@ func (s *TriageService) forwardFailed(ctx context.Context, rec *domain.AnalysisR
 	if cerr := s.analyses.Create(ctx, rec); cerr != nil {
 		err = errors.Join(err, cerr)
 	}
-	s.notifier.ForwardFailed(ctx, rec)
+	if n, ok := s.notifiers.For(0); ok {
+		n.ForwardFailed(ctx, rec)
+	}
 	return err
 }
 

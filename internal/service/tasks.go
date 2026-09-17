@@ -27,31 +27,45 @@ type TaskObserver interface {
 
 // TaskService implements task management use cases.
 type TaskService struct {
-	tasks    domain.TaskRepository
-	messages domain.MessageRepository
-	analyses domain.AnalysisRepository
-	conns    *ConnectionService
-	settings *SettingsService
-	sender   ReplySender
-	helpdesk HelpdeskReplier
-	observer TaskObserver
-	log      *slog.Logger
+	tasks     domain.TaskRepository
+	messages  domain.MessageRepository
+	analyses  domain.AnalysisRepository
+	conns     *ConnectionService
+	settings  *SettingsService
+	sender    ReplySender
+	helpdesks *BotRegistry[HelpdeskReplier]
+	observers *BotRegistry[TaskObserver]
+	log       *slog.Logger
 }
 
 func NewTaskService(tasks domain.TaskRepository, messages domain.MessageRepository, analyses domain.AnalysisRepository,
 	conns *ConnectionService, settings *SettingsService, sender ReplySender, log *slog.Logger) *TaskService {
 	return &TaskService{tasks: tasks, messages: messages, analyses: analyses, conns: conns, settings: settings,
-		sender: sender, log: log.With("component", "tasks")}
+		sender: sender, helpdesks: NewBotRegistry[HelpdeskReplier](nil), observers: NewBotRegistry[TaskObserver](nil),
+		log: log.With("component", "tasks")}
 }
 
-// SetHelpdesk wires replies to support desk tickets.
-func (s *TaskService) SetHelpdesk(h HelpdeskReplier) { s.helpdesk = h }
+// SetHelpdesk wires replies to the main bot's support desk tickets.
+func (s *TaskService) SetHelpdesk(h HelpdeskReplier) { s.helpdesks.Set(0, h) }
 
-// SetObserver wires the task change observer (ticket cards in the helpdesk group).
-func (s *TaskService) SetObserver(o TaskObserver) { s.observer = o }
+// SetObserver wires the main bot's task change observer (ticket cards in its helpdesk group).
+func (s *TaskService) SetObserver(o TaskObserver) { s.observers.Set(0, o) }
+
+// RegisterBot and UnregisterBot let the bot runtime manager plug an additional bot's
+// HelpdeskService/delivery.Bot in and out as it starts and stops, without a restart.
+func (s *TaskService) RegisterBot(botID int64, h HelpdeskReplier, o TaskObserver) {
+	s.helpdesks.Set(botID, h)
+	s.observers.Set(botID, o)
+}
+
+func (s *TaskService) UnregisterBot(botID int64) {
+	s.helpdesks.Unset(botID)
+	s.observers.Unset(botID)
+}
 
 func (s *TaskService) changed(ctx context.Context, t *domain.Task) {
-	if s.observer == nil {
+	o, ok := s.observers.For(domain.ParseHelpdeskBotID(t.ConnectionID))
+	if !ok {
 		return
 	}
 	cp := *t
@@ -59,7 +73,7 @@ func (s *TaskService) changed(ctx context.Context, t *domain.Task) {
 	go func() {
 		ctx, cancel := context.WithTimeout(actorCtx, 30*time.Second)
 		defer cancel()
-		s.observer.TaskChanged(ctx, &cp)
+		o.TaskChanged(ctx, &cp)
 	}()
 }
 
@@ -348,10 +362,11 @@ func (s *TaskService) sendToContact(ctx context.Context, t *domain.Task, text st
 	}
 	now := time.Now()
 	if t.IsHelpdesk() {
-		if s.helpdesk == nil {
+		h, ok := s.helpdesks.For(domain.ParseHelpdeskBotID(t.ConnectionID))
+		if !ok {
 			return domain.ErrHelpdeskOff
 		}
-		if err := s.helpdesk.ReplyToUser(ctx, t.ChatID, text); err != nil {
+		if err := h.ReplyToUser(ctx, t.ChatID, text); err != nil {
 			return err
 		}
 		t.ReplySentAt = &now
@@ -444,12 +459,14 @@ type Digest struct {
 
 func (d *Digest) Empty() bool { return d.New+d.InProgress+d.Snoozed == 0 }
 
-// BuildDigest collects open tasks of the scope into digest sections.
-func (s *TaskService) BuildDigest(ctx context.Context, scope domain.TaskScope) (*Digest, error) {
+// BuildDigest collects open tasks of the scope into digest sections. connID, when set, additionally
+// narrows to one bot's helpdesk — see domain.TaskFilter.ConnectionID.
+func (s *TaskService) BuildDigest(ctx context.Context, scope domain.TaskScope, connID string) (*Digest, error) {
 	open, _, err := s.tasks.List(ctx, domain.TaskFilter{
-		Statuses: []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed},
-		Scope:    scope,
-		Limit:    1000,
+		Statuses:     []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed},
+		Scope:        scope,
+		ConnectionID: connID,
+		Limit:        1000,
 	})
 	if err != nil {
 		return nil, err
@@ -484,12 +501,12 @@ type Overview struct {
 	Connection                        *domain.BusinessConnection
 }
 
-func (s *TaskService) Overview(ctx context.Context, scope domain.TaskScope) (*Overview, error) {
-	counts, err := s.tasks.CountByStatus(ctx, scope, time.Time{})
+func (s *TaskService) Overview(ctx context.Context, scope domain.TaskScope, connID string) (*Overview, error) {
+	counts, err := s.tasks.CountByStatus(ctx, scope, connID, time.Time{})
 	if err != nil {
 		return nil, err
 	}
-	overdue, err := s.tasks.CountOverdue(ctx, scope, time.Now())
+	overdue, err := s.tasks.CountOverdue(ctx, scope, connID, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -512,9 +529,9 @@ type Stats struct {
 	Analyses *domain.AnalysisStats
 }
 
-func (s *TaskService) Stats(ctx context.Context, scope domain.TaskScope, days int) (*Stats, error) {
+func (s *TaskService) Stats(ctx context.Context, scope domain.TaskScope, connID string, days int) (*Stats, error) {
 	since := time.Now().AddDate(0, 0, -days)
-	counts, err := s.tasks.CountByStatus(ctx, scope, since)
+	counts, err := s.tasks.CountByStatus(ctx, scope, connID, since)
 	if err != nil {
 		return nil, err
 	}

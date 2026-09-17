@@ -361,3 +361,11 @@ type BotCommand struct {
 	Command     string `json:"command"`
 	Description string `json:"description"`
 }
+
+// MenuButton replaces the "/" commands button next to the message box with a custom one, most
+// usefully one that opens a Mini App directly instead of the user hunting for it in the menu.
+type MenuButton struct {
+	Type   string      `json:"type"` // "commands" | "web_app" | "default"
+	Text   string      `json:"text,omitempty"`
+	WebApp *WebAppInfo `json:"web_app,omitempty"`
+}

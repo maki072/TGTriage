@@ -16,7 +16,7 @@ type HelpdeskRepo struct{ db *sql.DB }
 
 var _ domain.HelpdeskRepository = (*HelpdeskRepo)(nil)
 
-const hdUserColumns = `user_id, name, username, language_code, source, group_id, topic_id, topic_closed, blocked,
+const hdUserColumns = `bot_id, user_id, name, username, language_code, source, group_id, topic_id, topic_closed, blocked,
 	awaiting_since, reminded_at, last_message_at, created_at, updated_at`
 
 func scanHDUser(sc interface{ Scan(...any) error }) (domain.HelpdeskUser, error) {
@@ -25,7 +25,7 @@ func scanHDUser(sc interface{ Scan(...any) error }) (domain.HelpdeskUser, error)
 		closed, blocked                   int
 		awaiting, reminded, last, cr, upd int64
 	)
-	err := sc.Scan(&u.UserID, &u.Name, &u.Username, &u.LanguageCode, &u.Source, &u.GroupID, &u.TopicID, &closed, &blocked,
+	err := sc.Scan(&u.BotID, &u.UserID, &u.Name, &u.Username, &u.LanguageCode, &u.Source, &u.GroupID, &u.TopicID, &closed, &blocked,
 		&awaiting, &reminded, &last, &cr, &upd)
 	if err != nil {
 		return u, err
@@ -51,12 +51,13 @@ func (r *HelpdeskRepo) oneUser(ctx context.Context, cond string, args ...any) (*
 	return &u, nil
 }
 
-func (r *HelpdeskRepo) GetUser(ctx context.Context, userID int64) (*domain.HelpdeskUser, error) {
-	return r.oneUser(ctx, `WHERE user_id = ?`, userID)
+func (r *HelpdeskRepo) GetUser(ctx context.Context, botID, userID int64) (*domain.HelpdeskUser, error) {
+	return r.oneUser(ctx, `WHERE bot_id = ? AND user_id = ?`, botID, userID)
 }
 
-func (r *HelpdeskRepo) UserByTopic(ctx context.Context, groupID int64, topicID int) (*domain.HelpdeskUser, error) {
-	return r.oneUser(ctx, `WHERE group_id = ? AND topic_id = ? ORDER BY updated_at DESC LIMIT 1`, groupID, topicID)
+func (r *HelpdeskRepo) UserByTopic(ctx context.Context, botID, groupID int64, topicID int) (*domain.HelpdeskUser, error) {
+	return r.oneUser(ctx, `WHERE bot_id = ? AND group_id = ? AND topic_id = ? ORDER BY updated_at DESC LIMIT 1`,
+		botID, groupID, topicID)
 }
 
 func (r *HelpdeskRepo) SaveUser(ctx context.Context, u *domain.HelpdeskUser) error {
@@ -65,13 +66,13 @@ func (r *HelpdeskRepo) SaveUser(ctx context.Context, u *domain.HelpdeskUser) err
 		u.CreatedAt = now
 	}
 	u.UpdatedAt = now
-	_, err := r.db.ExecContext(ctx, `INSERT INTO hd_users (`+hdUserColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT (user_id) DO UPDATE SET
+	_, err := r.db.ExecContext(ctx, `INSERT INTO hd_users (`+hdUserColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT (bot_id, user_id) DO UPDATE SET
 			name = excluded.name, username = excluded.username, language_code = excluded.language_code,
 			source = excluded.source, group_id = excluded.group_id, topic_id = excluded.topic_id,
 			topic_closed = excluded.topic_closed, blocked = excluded.blocked, awaiting_since = excluded.awaiting_since,
 			reminded_at = excluded.reminded_at, last_message_at = excluded.last_message_at, updated_at = excluded.updated_at`,
-		u.UserID, u.Name, u.Username, u.LanguageCode, u.Source, u.GroupID, u.TopicID, boolInt(u.TopicClosed), boolInt(u.Blocked),
+		u.BotID, u.UserID, u.Name, u.Username, u.LanguageCode, u.Source, u.GroupID, u.TopicID, boolInt(u.TopicClosed), boolInt(u.Blocked),
 		ptrToUnix(u.AwaitingSince), ptrToUnix(u.RemindedAt), ptrToUnix(u.LastMessageAt), toUnix(u.CreatedAt), toUnix(u.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("save helpdesk user: %w", err)
@@ -79,11 +80,15 @@ func (r *HelpdeskRepo) SaveUser(ctx context.Context, u *domain.HelpdeskUser) err
 	return nil
 }
 
-func (r *HelpdeskRepo) ListUsers(ctx context.Context, f domain.HelpdeskUserFilter) ([]domain.HelpdeskUser, int, error) {
+func (r *HelpdeskRepo) ListUsers(ctx context.Context, botID *int64, f domain.HelpdeskUserFilter) ([]domain.HelpdeskUser, int, error) {
 	var (
 		where []string
 		args  []any
 	)
+	if botID != nil {
+		where = append(where, "bot_id = ?")
+		args = append(args, *botID)
+	}
 	if f.AwaitingOnly {
 		where = append(where, "awaiting_since > 0")
 	}
@@ -122,11 +127,11 @@ func (r *HelpdeskRepo) ListUsers(ctx context.Context, f domain.HelpdeskUserFilte
 	return out, total, rows.Err()
 }
 
-func (r *HelpdeskRepo) DueReminders(ctx context.Context, cutoff time.Time) ([]domain.HelpdeskUser, error) {
+func (r *HelpdeskRepo) DueReminders(ctx context.Context, botID int64, cutoff time.Time) ([]domain.HelpdeskUser, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT `+hdUserColumns+` FROM hd_users
-		WHERE awaiting_since > 0 AND awaiting_since <= ? AND reminded_at <= ? AND topic_id > 0
+		WHERE bot_id = ? AND awaiting_since > 0 AND awaiting_since <= ? AND reminded_at <= ? AND topic_id > 0
 			AND topic_closed = 0 AND blocked = 0
-		ORDER BY awaiting_since`, cutoff.Unix(), cutoff.Unix())
+		ORDER BY awaiting_since`, botID, cutoff.Unix(), cutoff.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("due reminders: %w", err)
 	}
@@ -142,7 +147,7 @@ func (r *HelpdeskRepo) DueReminders(ctx context.Context, cutoff time.Time) ([]do
 	return out, rows.Err()
 }
 
-const hdMessageColumns = `id, user_id, direction, user_msg_id, group_id, group_msg_id, operator_id, created_at`
+const hdMessageColumns = `id, bot_id, user_id, direction, user_msg_id, group_id, group_msg_id, operator_id, created_at`
 
 func scanHDMessage(sc interface{ Scan(...any) error }) (domain.HelpdeskMessage, error) {
 	var (
@@ -150,7 +155,7 @@ func scanHDMessage(sc interface{ Scan(...any) error }) (domain.HelpdeskMessage, 
 		dir string
 		cr  int64
 	)
-	if err := sc.Scan(&m.ID, &m.UserID, &dir, &m.UserMsgID, &m.GroupID, &m.GroupMsgID, &m.OperatorID, &cr); err != nil {
+	if err := sc.Scan(&m.ID, &m.BotID, &m.UserID, &dir, &m.UserMsgID, &m.GroupID, &m.GroupMsgID, &m.OperatorID, &cr); err != nil {
 		return m, err
 	}
 	m.Direction = domain.HelpdeskDirection(dir)
@@ -163,8 +168,8 @@ func (r *HelpdeskRepo) SaveMessage(ctx context.Context, m *domain.HelpdeskMessag
 		m.CreatedAt = time.Now()
 	}
 	res, err := r.db.ExecContext(ctx, `INSERT INTO hd_messages
-		(user_id, direction, user_msg_id, group_id, group_msg_id, operator_id, created_at) VALUES (?,?,?,?,?,?,?)`,
-		m.UserID, string(m.Direction), m.UserMsgID, m.GroupID, m.GroupMsgID, m.OperatorID, m.CreatedAt.Unix())
+		(bot_id, user_id, direction, user_msg_id, group_id, group_msg_id, operator_id, created_at) VALUES (?,?,?,?,?,?,?,?)`,
+		m.BotID, m.UserID, string(m.Direction), m.UserMsgID, m.GroupID, m.GroupMsgID, m.OperatorID, m.CreatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("save helpdesk message: %w", err)
 	}
@@ -183,18 +188,18 @@ func (r *HelpdeskRepo) oneMessage(ctx context.Context, cond string, args ...any)
 	return &m, nil
 }
 
-func (r *HelpdeskRepo) MessageByUserMsg(ctx context.Context, userID int64, userMsgID int) (*domain.HelpdeskMessage, error) {
-	return r.oneMessage(ctx, `WHERE user_id = ? AND user_msg_id = ?`, userID, userMsgID)
+func (r *HelpdeskRepo) MessageByUserMsg(ctx context.Context, botID, userID int64, userMsgID int) (*domain.HelpdeskMessage, error) {
+	return r.oneMessage(ctx, `WHERE bot_id = ? AND user_id = ? AND user_msg_id = ?`, botID, userID, userMsgID)
 }
 
-func (r *HelpdeskRepo) MessageByGroupMsg(ctx context.Context, groupID int64, groupMsgID int) (*domain.HelpdeskMessage, error) {
-	return r.oneMessage(ctx, `WHERE group_id = ? AND group_msg_id = ?`, groupID, groupMsgID)
+func (r *HelpdeskRepo) MessageByGroupMsg(ctx context.Context, botID, groupID int64, groupMsgID int) (*domain.HelpdeskMessage, error) {
+	return r.oneMessage(ctx, `WHERE bot_id = ? AND group_id = ? AND group_msg_id = ?`, botID, groupID, groupMsgID)
 }
 
-func (r *HelpdeskRepo) MessagesAround(ctx context.Context, groupID int64, t time.Time, window time.Duration) ([]domain.HelpdeskMessage, error) {
+func (r *HelpdeskRepo) MessagesAround(ctx context.Context, botID, groupID int64, t time.Time, window time.Duration) ([]domain.HelpdeskMessage, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT `+hdMessageColumns+` FROM hd_messages
-		WHERE group_id = ? AND direction = ? AND created_at BETWEEN ? AND ? ORDER BY id`,
-		groupID, string(domain.HelpdeskIn), t.Add(-window).Unix(), t.Add(window).Unix())
+		WHERE bot_id = ? AND group_id = ? AND direction = ? AND created_at BETWEEN ? AND ? ORDER BY id`,
+		botID, groupID, string(domain.HelpdeskIn), t.Add(-window).Unix(), t.Add(window).Unix())
 	if err != nil {
 		return nil, fmt.Errorf("helpdesk messages around: %w", err)
 	}

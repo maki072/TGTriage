@@ -61,7 +61,7 @@ func newForwardTestService(t *testing.T, env map[string]string, providers ...ai.
 	}
 	n := chanNotifier{created: make(chan *domain.Task, 4)}
 	s := NewTriageService(store.Messages, store.Tasks, store.Analyses,
-		NewConnectionService(store.Connections, 1), settings, registry, n, slog.New(slog.DiscardHandler))
+		NewConnectionService(store.Connections, 1), settings, nil, registry, n, slog.New(slog.DiscardHandler))
 	return s, settings, store, n
 }
 

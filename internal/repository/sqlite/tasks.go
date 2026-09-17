@@ -143,6 +143,10 @@ func (r *TaskRepo) List(ctx context.Context, f domain.TaskFilter) ([]domain.Task
 		where = append(where, c)
 		args = append(args, a...)
 	}
+	if f.ConnectionID != "" {
+		where = append(where, "connection_id = ?")
+		args = append(args, f.ConnectionID)
+	}
 	if f.ChatID != 0 {
 		where = append(where, "chat_id = ?")
 		args = append(args, f.ChatID)
@@ -234,7 +238,7 @@ func (r *TaskRepo) DueRemind(ctx context.Context, now time.Time) ([]domain.Task,
 
 func (r *TaskRepo) DuePersonalNudge(ctx context.Context, cutoff time.Time) ([]domain.Task, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT `+taskColumns+` FROM tasks
-		WHERE status IN (?, ?) AND connection_id <> ? AND chat_id <> 0 AND merged_into = 0
+		WHERE status IN (?, ?) AND NOT `+helpdeskConnCond+` AND chat_id <> 0 AND merged_into = 0
 			AND (CASE WHEN last_reminded_at > 0 THEN last_reminded_at ELSE created_at END) <= ?
 		ORDER BY created_at`,
 		string(domain.StatusNew), string(domain.StatusInProgress), domain.HelpdeskConnectionID, cutoff.Unix())
@@ -253,13 +257,17 @@ func (r *TaskRepo) DuePersonalNudge(ctx context.Context, cutoff time.Time) ([]do
 	return out, rows.Err()
 }
 
+// helpdeskConnCond matches the connection_id of every bot's helpdesk (the main bot's literal id or
+// any additional bot's "helpdesk:<id>").
+const helpdeskConnCond = "(connection_id = ? OR connection_id LIKE 'helpdesk:%')"
+
 // scopeCond returns the SQL condition (with args) selecting tasks of a scope; empty for all tasks.
 func scopeCond(scope domain.TaskScope) (string, []any) {
 	switch scope {
 	case domain.ScopeHelpdesk:
-		return "connection_id = ?", []any{domain.HelpdeskConnectionID}
+		return helpdeskConnCond, []any{domain.HelpdeskConnectionID}
 	case domain.ScopePersonal:
-		return "connection_id <> ?", []any{domain.HelpdeskConnectionID}
+		return "NOT " + helpdeskConnCond, []any{domain.HelpdeskConnectionID}
 	}
 	return "", nil
 }
@@ -272,8 +280,12 @@ func andScope(scope domain.TaskScope, args []any) (string, []any) {
 	return " AND " + c, append(args, a...)
 }
 
-func (r *TaskRepo) CountByStatus(ctx context.Context, scope domain.TaskScope, since time.Time) (map[domain.TaskStatus]int, error) {
+func (r *TaskRepo) CountByStatus(ctx context.Context, scope domain.TaskScope, connID string, since time.Time) (map[domain.TaskStatus]int, error) {
 	cond, args := andScope(scope, []any{toUnix(since)})
+	if connID != "" {
+		cond += " AND connection_id = ?"
+		args = append(args, connID)
+	}
 	rows, err := r.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM tasks WHERE created_at >= ?`+cond+` GROUP BY status`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("count by status: %w", err)
@@ -293,9 +305,13 @@ func (r *TaskRepo) CountByStatus(ctx context.Context, scope domain.TaskScope, si
 	return out, rows.Err()
 }
 
-func (r *TaskRepo) CountOverdue(ctx context.Context, scope domain.TaskScope, now time.Time) (int, error) {
+func (r *TaskRepo) CountOverdue(ctx context.Context, scope domain.TaskScope, connID string, now time.Time) (int, error) {
 	var n int
 	cond, args := andScope(scope, []any{string(domain.StatusNew), string(domain.StatusInProgress), now.Unix()})
+	if connID != "" {
+		cond += " AND connection_id = ?"
+		args = append(args, connID)
+	}
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks
 		WHERE status IN (?, ?) AND deadline > 0 AND deadline < ?`+cond, args...).Scan(&n)
 	return n, err

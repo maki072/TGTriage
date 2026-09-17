@@ -145,14 +145,12 @@ func run(cfg *config.Config, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("load settings: %w", err)
 	}
+	botsSvc, err := service.NewBotService(ctx, store.Bots, log)
+	if err != nil {
+		return fmt.Errorf("load bots: %w", err)
+	}
 	registry := ai.NewRegistry()
 	registerProviders(registry, settings.Get(), cfg.Socks5Addr)
-	settings.OnChange(func(old, next domain.Settings) {
-		if providerSignature(old) != providerSignature(next) {
-			registerProviders(registry, next, cfg.Socks5Addr)
-			log.Info("AI providers reconfigured")
-		}
-	})
 
 	api := telegram.NewClient(cfg.TelegramToken, cfg.TelegramAPIURL, cfg.Socks5Addr, log.With("component", "telegram"))
 	me, err := api.GetMe(ctx)
@@ -164,29 +162,46 @@ func run(cfg *config.Config, log *slog.Logger) error {
 	conns := service.NewConnectionService(store.Connections, cfg.OwnerID)
 	gateway := tgbot.NewGateway(api, cfg.OwnerID, me.ID)
 	tasks := service.NewTaskService(store.Tasks, store.Messages, store.Analyses, conns, settings, gateway, log)
-	helpdesk := service.NewHelpdeskService(store.Helpdesk, store.Messages, settings, gateway, cfg.OwnerID, me.ID, log)
+	helpdesk := service.NewHelpdeskService(store.Helpdesk, store.Messages, settings, service.GlobalHelpdeskConfig(settings),
+		gateway, cfg.OwnerID, me.ID, 0, log)
 	tasks.SetHelpdesk(helpdesk)
 	bot := tgbot.New(api, tgbot.Config{OwnerID: cfg.OwnerID, BotID: me.ID, BotUsername: me.Username},
 		tasks, settings, conns, helpdesk, log)
 	tasks.SetObserver(bot)
-	triage := service.NewTriageService(store.Messages, store.Tasks, store.Analyses, conns, settings, registry, bot, log)
+	triage := service.NewTriageService(store.Messages, store.Tasks, store.Analyses, conns, settings, botsSvc, registry, bot, log)
 	bot.SetTriage(triage)
 	helpdesk.SetTriage(triage)
 	backups := service.NewBackupService(store, filepath.Join(filepath.Dir(cfg.DBPath), "backups"), settings, gateway, log)
 	scheduler := service.NewScheduler(tasks, settings, store.Messages, bot, helpdesk, backups, log)
+	hdRegistry := service.NewBotRegistry(helpdesk)
+	botMgr := newBotManager(ctx, cfg, store, settings, botsSvc, conns, tasks, triage, scheduler, hdRegistry, log)
 
+	settings.OnChange(func(old, next domain.Settings) {
+		if providerSignature(old) != providerSignature(next) {
+			registerProviders(registry, next, cfg.Socks5Addr)
+			log.Info("AI providers reconfigured")
+		}
+		if old.WebAppPublicURL != next.WebAppPublicURL {
+			bot.EnsureMenuButton(ctx)
+			botMgr.BroadcastMenuButton(ctx)
+		}
+	})
 	var restartRequested atomic.Bool
 	webappSrv := webapp.New(webapp.Config{
 		Addr: cfg.WebAppAddr, BotToken: cfg.TelegramToken, OwnerID: cfg.OwnerID, DevInsecure: cfg.WebAppDevInsecure,
+		TelegramAPIURL: cfg.TelegramAPIURL, Socks5Addr: cfg.Socks5Addr,
 	}, webapp.Deps{
-		Tasks: tasks, Settings: settings, Triage: triage, Helpdesk: helpdesk, Backups: backups,
-		Restart: func() { restartRequested.Store(true); stop() },
+		Tasks: tasks, Settings: settings, Triage: triage, Helpdesk: helpdesk, Backups: backups, Bots: botsSvc,
+		Helpdesks: hdRegistry, Restart: func() { restartRequested.Store(true); stop() },
 	}, log)
 
 	helpdesk.Start(ctx)
 	if err := triage.Start(ctx); err != nil {
 		return err
 	}
+	botMgr.Reconcile(botsSvc.List())
+	botsSvc.OnChange(botMgr.Reconcile)
+
 	var wg sync.WaitGroup
 	wg.Go(func() { scheduler.Run(ctx) })
 	wg.Go(func() {
@@ -210,6 +225,7 @@ func run(cfg *config.Config, log *slog.Logger) error {
 	bot.Run(ctx) // blocks until SIGINT/SIGTERM or a restart request
 
 	log.Info("shutting down")
+	botMgr.StopAll()
 	if !triage.Wait(25 * time.Second) {
 		log.Warn("triage workers did not finish in time; unanalyzed messages will be recovered on next start")
 	}

@@ -20,8 +20,12 @@ var staticFS embed.FS
 // Config configures the Mini App HTTP server.
 type Config struct {
 	Addr     string // listen address, e.g. ":8080"
-	BotToken string // used to validate Telegram initData
+	BotToken string // used to validate Telegram initData of the main bot
 	OwnerID  int64
+	// TelegramAPIURL and Socks5Addr let the server verify a newly pasted bot token (getMe) when
+	// the owner adds an additional bot from the "Боты" settings section.
+	TelegramAPIURL string
+	Socks5Addr     string
 	// DevInsecure allows requests without a valid Telegram initData when they originate from
 	// a private/loopback address — lets you open the Mini App straight from a LAN browser
 	// before a public HTTPS domain is wired up. Every such request is logged at WARN. Never
@@ -34,27 +38,34 @@ type Deps struct {
 	Tasks    *service.TaskService
 	Settings *service.SettingsService
 	Triage   *service.TriageService
-	Helpdesk *service.HelpdeskService
+	Helpdesk *service.HelpdeskService // the main bot's own desk
 	Backups  *service.BackupService
-	Restart  func() // stops the service gracefully; systemd starts it again
+	Bots     *service.BotService
+	// Helpdesks resolves an additional bot's own HelpdeskService while its runtime is live (see
+	// cmd/tgtriage's botManager) — nil/absent entries mean that bot isn't currently running.
+	Helpdesks *service.BotRegistry[*service.HelpdeskService]
+	Restart   func() // stops the service gracefully; systemd starts it again
 }
 
 // Server is the Mini App HTTP delivery layer.
 type Server struct {
-	cfg      Config
-	tasks    *service.TaskService
-	settings *service.SettingsService
-	triage   *service.TriageService
-	helpdesk *service.HelpdeskService
-	backups  *service.BackupService
-	restart  func()
-	log      *slog.Logger
-	http     *http.Server
+	cfg       Config
+	tasks     *service.TaskService
+	settings  *service.SettingsService
+	triage    *service.TriageService
+	helpdesk  *service.HelpdeskService
+	backups   *service.BackupService
+	bots      *service.BotService
+	helpdesks *service.BotRegistry[*service.HelpdeskService]
+	restart   func()
+	log       *slog.Logger
+	http      *http.Server
 }
 
 func New(cfg Config, deps Deps, log *slog.Logger) *Server {
 	s := &Server{cfg: cfg, tasks: deps.Tasks, settings: deps.Settings, triage: deps.Triage, helpdesk: deps.Helpdesk,
-		backups: deps.Backups, restart: deps.Restart, log: log.With("component", "webapp")}
+		backups: deps.Backups, bots: deps.Bots, helpdesks: deps.Helpdesks, restart: deps.Restart,
+		log: log.With("component", "webapp")}
 	s.http = &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           s.routes(),
@@ -123,6 +134,11 @@ func (s *Server) routes() http.Handler {
 	api.Handle("GET /api/backups", s.ownerOnly(s.handleBackupList))
 	api.Handle("POST /api/backups", s.ownerOnly(s.handleBackupRun))
 	api.Handle("POST /api/system/restart", s.ownerOnly(s.handleRestart))
+
+	api.Handle("GET /api/bots", s.ownerOnly(s.handleBotList))
+	api.Handle("POST /api/bots", s.ownerOnly(s.handleBotAdd))
+	api.Handle("POST /api/bots/{id}", s.ownerOnly(s.handleBotPatch))
+	api.Handle("DELETE /api/bots/{id}", s.ownerOnly(s.handleBotDelete))
 	mux.Handle("/api/", s.recover(s.auth(api)))
 
 	sub, err := fs.Sub(staticFS, "static")
@@ -164,9 +180,10 @@ const (
 )
 
 type principal struct {
-	ID   int64
-	Name string
-	Role string
+	ID      int64
+	Name    string
+	Role    string
+	BotDBID int64 // 0 = the main bot; which bot's token validated this launch (see auth)
 }
 
 type principalKey struct{}
@@ -178,8 +195,11 @@ func principalFrom(r *http.Request) principal {
 
 func (p principal) isOwner() bool { return p.Role == roleOwner }
 
-// auth validates the Telegram Mini App launch data: the owner gets full access, members of the
-// helpdesk group get the operator role.
+// auth validates the Telegram Mini App launch data. It first tries the main bot's fixed token
+// (the common case, and unchanged from before multi-bot); on mismatch it tries every additional
+// bot's own token, since the Mini App's launch URL doesn't otherwise say which bot opened it — a
+// valid signature against a specific bot's token is exactly what tells us. The owner gets full
+// access on any bot; everyone else needs to be a member of that same bot's helpdesk group.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		serve := func(p principal) {
@@ -189,14 +209,15 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		}
 		initData := extractInitData(r)
 		if initData != "" {
-			userID, ok := validateInitData(s.cfg.BotToken, initData)
+			botID, userID, ok := s.resolveInitData(initData)
 			if !ok {
 				writeError(w, http.StatusUnauthorized, "invalid Telegram init data")
 				return
 			}
-			p := principal{ID: userID, Name: initDataUserName(initData), Role: roleOwner}
+			p := principal{ID: userID, Name: initDataUserName(initData), Role: roleOwner, BotDBID: botID}
 			if userID != s.cfg.OwnerID {
-				if !s.helpdesk.IsOperator(r.Context(), userID) {
+				hd, live := s.helpdeskRuntime(botID)
+				if !live || !hd.IsOperator(r.Context(), userID) {
 					writeError(w, http.StatusForbidden, "нет доступа: вы не владелец и не оператор хелпдеска")
 					return
 				}
@@ -212,6 +233,35 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		}
 		writeError(w, http.StatusUnauthorized, "missing Telegram init data")
 	})
+}
+
+// resolveInitData finds which bot's token validates initData: the main bot first (the common,
+// cheap case), then every active additional bot.
+func (s *Server) resolveInitData(initData string) (botID, userID int64, ok bool) {
+	if userID, ok := validateInitData(s.cfg.BotToken, initData); ok {
+		return 0, userID, true
+	}
+	if s.bots == nil {
+		return 0, 0, false
+	}
+	for _, b := range s.bots.Active() {
+		if userID, ok := validateInitData(b.Token, initData); ok {
+			return b.ID, userID, true
+		}
+	}
+	return 0, 0, false
+}
+
+// helpdeskRuntime resolves botID's own HelpdeskService: the main one for 0, or the additional
+// bot's instance while its polling loop is live (see botManager).
+func (s *Server) helpdeskRuntime(botID int64) (*service.HelpdeskService, bool) {
+	if botID == 0 {
+		return s.helpdesk, s.helpdesk != nil
+	}
+	if s.helpdesks == nil {
+		return nil, false
+	}
+	return s.helpdesks.For(botID)
 }
 
 func (s *Server) ownerOnly(h http.HandlerFunc) http.Handler {

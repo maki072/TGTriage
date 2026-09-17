@@ -26,6 +26,7 @@ type Task struct {
 	ChatID         int64         `json:"chat_id"`
 	Forwarded      bool          `json:"forwarded"` // created from a forwarded message: no chat to reply to
 	Helpdesk       bool          `json:"helpdesk"`
+	BotID          int64         `json:"bot_id"` // 0 = main bot; which bot's desk this ticket belongs to
 	HelpdeskUser   *HelpdeskUser `json:"helpdesk_user,omitempty"`
 	SenderName     string        `json:"sender_name"`
 	SenderUsername string        `json:"sender_username"`
@@ -75,6 +76,7 @@ func toTaskDTO(t domain.Task, loc *time.Location) Task {
 	now := time.Now()
 	return Task{
 		ID: t.ID, ChatID: t.ChatID, Forwarded: !t.HasChat(), Helpdesk: t.IsHelpdesk(),
+		BotID:      domain.ParseHelpdeskBotID(t.ConnectionID),
 		SenderName: t.SenderName, SenderUsername: t.SenderUsername,
 		ProfileURL:    profileURL(t.SenderUsername, t.SenderID),
 		Title:         t.Title,
@@ -121,6 +123,7 @@ type TaskList struct {
 // HelpdeskUser is the JSON view of a support desk user.
 type HelpdeskUser struct {
 	UserID        int64   `json:"user_id"`
+	BotID         int64   `json:"bot_id"` // 0 = main bot; which bot this contact wrote to
 	Name          string  `json:"name"`
 	Username      string  `json:"username"`
 	LanguageCode  string  `json:"language_code"`
@@ -136,7 +139,7 @@ type HelpdeskUser struct {
 
 func toHDUserDTO(u *domain.HelpdeskUser, topicURL string, loc *time.Location) HelpdeskUser {
 	return HelpdeskUser{
-		UserID: u.UserID, Name: u.Name, Username: u.Username, LanguageCode: u.LanguageCode, Source: u.Source,
+		UserID: u.UserID, BotID: u.BotID, Name: u.Name, Username: u.Username, LanguageCode: u.LanguageCode, Source: u.Source,
 		ProfileURL: profileURL(u.Username, u.UserID), TopicURL: topicURL, TopicClosed: u.TopicClosed, Blocked: u.Blocked,
 		AwaitingSince: fmtTimePtr(u.AwaitingSince, loc), LastMessageAt: fmtTimePtr(u.LastMessageAt, loc),
 		CreatedAt: fmtTime(u.CreatedAt, loc),
@@ -234,6 +237,59 @@ func toStatsDTO(s *service.Stats) Stats {
 			WithTask: s.Analyses.WithTask, AvgLatencyMs: s.Analyses.AvgLatencyMs, ByProvider: by,
 		},
 	}
+}
+
+// Bot is the JSON view of an additional bot for the "Боты" settings section. The token itself
+// never leaves the server after it's been saved.
+type Bot struct {
+	ID          int64       `json:"id"`
+	Label       string      `json:"label"`
+	Username    string      `json:"username"`
+	Active      bool        `json:"active"`
+	Sensitivity string      `json:"sensitivity"` // "" = inherit the shared setting
+	AIChainLen  int         `json:"ai_chain_len"`
+	Helpdesk    BotHelpdesk `json:"helpdesk"`
+}
+
+// BotHelpdesk is an additional bot's own, independent support desk configuration.
+type BotHelpdesk struct {
+	Enabled          bool   `json:"enabled"`
+	GroupID          int64  `json:"group_id"`
+	TriageEnabled    bool   `json:"triage_enabled"`
+	About            string `json:"about"`
+	GreetingEnabled  bool   `json:"greeting_enabled"`
+	GreetingText     string `json:"greeting_text"`
+	AutoReplyEnabled bool   `json:"autoreply_enabled"`
+	AutoReplyText    string `json:"autoreply_text"`
+	HoursEnabled     bool   `json:"hours_enabled"`
+	HoursStart       string `json:"hours_start"`
+	HoursEnd         string `json:"hours_end"`
+	HoursDays        string `json:"hours_days"`
+	OffHoursText     string `json:"offhours_text"`
+	ReminderMinutes  int    `json:"reminder_minutes"`
+}
+
+func toBotDTO(b domain.Bot) Bot {
+	h := b.Helpdesk
+	return Bot{
+		ID: b.ID, Label: b.Label, Username: b.Username, Active: b.Active,
+		Sensitivity: string(b.Sensitivity), AIChainLen: len(b.AIChain),
+		Helpdesk: BotHelpdesk{
+			Enabled: h.Enabled, GroupID: h.GroupID, TriageEnabled: h.TriageEnabled, About: h.About,
+			GreetingEnabled: h.GreetingEnabled, GreetingText: h.GreetingText,
+			AutoReplyEnabled: h.AutoReplyEnabled, AutoReplyText: h.AutoReplyText,
+			HoursEnabled: h.HoursEnabled, HoursStart: h.HoursStart, HoursEnd: h.HoursEnd, HoursDays: h.HoursDays,
+			OffHoursText: h.OffHoursText, ReminderMinutes: h.ReminderMinutes,
+		},
+	}
+}
+
+func toBotDTOs(bots []domain.Bot) []Bot {
+	out := make([]Bot, len(bots))
+	for i, b := range bots {
+		out[i] = toBotDTO(b)
+	}
+	return out
 }
 
 // AIKey is the JSON view of an AI chain entry. The key itself never leaves the server.

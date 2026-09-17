@@ -93,10 +93,12 @@ type HelpdeskService struct {
 	repo      domain.HelpdeskRepository
 	messages  domain.MessageRepository
 	settings  *SettingsService
+	cfg       HelpdeskConfigStore // this bot's own helpdesk config (global Settings for the main bot)
 	transport HelpdeskTransport
 	triage    *TriageService
 	ownerID   int64
-	botID     int64
+	botID     int64 // the Telegram bot's own user id (for "message from myself" checks)
+	botDBID   int64 // 0 for the main bot, otherwise the row id in the bots table
 	log       *slog.Logger
 
 	mu        sync.Mutex
@@ -133,10 +135,11 @@ type pendingForward struct {
 }
 
 func NewHelpdeskService(repo domain.HelpdeskRepository, messages domain.MessageRepository, settings *SettingsService,
-	transport HelpdeskTransport, ownerID, botID int64, log *slog.Logger) *HelpdeskService {
+	cfg HelpdeskConfigStore, transport HelpdeskTransport, ownerID, botID, botDBID int64, log *slog.Logger) *HelpdeskService {
 	return &HelpdeskService{
-		repo: repo, messages: messages, settings: settings, transport: transport, ownerID: ownerID, botID: botID,
-		log:   log.With("component", "helpdesk"),
+		repo: repo, messages: messages, settings: settings, cfg: cfg, transport: transport,
+		ownerID: ownerID, botID: botID, botDBID: botDBID,
+		log:   log.With("component", "helpdesk", "bot_db_id", botDBID),
 		locks: map[int64]*sync.Mutex{}, albums: map[string]*pendingAlbum{}, members: map[int64]memberEntry{},
 		forwards: map[int64]*pendingForward{}, baseCtx: context.Background(),
 	}
@@ -161,14 +164,27 @@ func (s *HelpdeskService) Wait(timeout time.Duration) bool {
 }
 
 // Active reports whether the desk is enabled and configured.
-func (s *HelpdeskService) Active() bool { return s.settings.Get().Helpdesk.Active() }
+func (s *HelpdeskService) Active() bool { return s.cfg.Get().Active() }
 
 // GroupID returns the configured helpdesk group (0 when the desk is off).
 func (s *HelpdeskService) GroupID() int64 {
-	if h := s.settings.Get().Helpdesk; h.Active() {
+	if h := s.cfg.Get(); h.Active() {
 		return h.GroupID
 	}
 	return 0
+}
+
+// ConfiguredGroupID returns the group set for this bot's desk regardless of the enabled switch —
+// for "is this chat the one bound to my desk" checks that must still fire while it's disabled.
+func (s *HelpdeskService) ConfiguredGroupID() int64 { return s.cfg.Get().GroupID }
+
+// Config returns this bot's own helpdesk configuration, for display (e.g. the /menu screen).
+func (s *HelpdeskService) Config() domain.HelpdeskSettings { return s.cfg.Get() }
+
+// UpdateConfig applies fn to this bot's own helpdesk config (the shared Settings for the main
+// bot, or its own row otherwise) — used by the chat "use this group for the helpdesk" offer.
+func (s *HelpdeskService) UpdateConfig(ctx context.Context, fn func(*domain.HelpdeskSettings)) error {
+	return s.cfg.Update(ctx, fn)
 }
 
 func (s *HelpdeskService) userLock(userID int64) *sync.Mutex {
@@ -202,7 +218,7 @@ func (s *HelpdeskService) detached(name string, fn func(ctx context.Context)) {
 // OnUserMessage handles a private message from a user: relays it into their topic (creating one on
 // the first message), stores it for history and triage and sends auto-replies.
 func (s *HelpdeskService) OnUserMessage(ctx context.Context, in UserMessage) error {
-	st := s.settings.Get().Helpdesk
+	st := s.cfg.Get()
 	if !st.Active() {
 		return domain.ErrHelpdeskOff
 	}
@@ -210,13 +226,13 @@ func (s *HelpdeskService) OnUserMessage(ctx context.Context, in UserMessage) err
 	lock.Lock()
 	defer lock.Unlock()
 
-	u, err := s.repo.GetUser(ctx, in.UserID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, in.UserID)
 	isNew := errors.Is(err, domain.ErrNotFound)
 	if err != nil && !isNew {
 		return err
 	}
 	if isNew {
-		u = &domain.HelpdeskUser{UserID: in.UserID}
+		u = &domain.HelpdeskUser{BotID: s.botDBID, UserID: in.UserID}
 	}
 	renamed := !isNew && (u.Name != in.Name || u.Username != in.Username)
 	u.Name, u.Username = in.Name, in.Username
@@ -268,14 +284,14 @@ func (s *HelpdeskService) OnUserMessage(ctx context.Context, in UserMessage) err
 }
 
 func (s *HelpdeskService) flushUserAlbum(ctx context.Context, userID int64, msgs []UserMessage) {
-	st := s.settings.Get().Helpdesk
+	st := s.cfg.Get()
 	if !st.Active() {
 		return
 	}
 	lock := s.userLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
-	u, err := s.repo.GetUser(ctx, userID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil {
 		s.log.Error("album: load user", "user_id", userID, "err", err)
 		return
@@ -330,7 +346,7 @@ func (s *HelpdeskService) relayFromUser(ctx context.Context, u *domain.HelpdeskU
 	}
 	replyTo := 0
 	if r := msgs[0].ReplyToID; r != 0 {
-		if m, err := s.repo.MessageByUserMsg(ctx, u.UserID, r); err == nil && m.GroupID == groupID {
+		if m, err := s.repo.MessageByUserMsg(ctx, s.botDBID, u.UserID, r); err == nil && m.GroupID == groupID {
 			replyTo = m.GroupMsgID
 		}
 	}
@@ -355,7 +371,7 @@ func (s *HelpdeskService) relayFromUser(ctx context.Context, u *domain.HelpdeskU
 		if i >= len(copies) {
 			break
 		}
-		if err := s.repo.SaveMessage(ctx, &domain.HelpdeskMessage{UserID: u.UserID, Direction: domain.HelpdeskIn,
+		if err := s.repo.SaveMessage(ctx, &domain.HelpdeskMessage{BotID: s.botDBID, UserID: u.UserID, Direction: domain.HelpdeskIn,
 			UserMsgID: id, GroupID: groupID, GroupMsgID: copies[i], CreatedAt: now}); err != nil {
 			s.log.Warn("save message mapping", "err", err)
 		}
@@ -367,7 +383,7 @@ func (s *HelpdeskService) storeIncoming(ctx context.Context, u *domain.HelpdeskU
 	if strings.TrimSpace(in.Text) == "" {
 		return
 	}
-	dm := &domain.Message{ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, MessageID: in.MessageID,
+	dm := &domain.Message{ConnectionID: domain.HelpdeskConnectionFor(s.botDBID), ChatID: u.UserID, MessageID: in.MessageID,
 		SenderID: u.UserID, SenderName: u.Name, SenderUsername: u.Username, Text: in.Text, SentAt: in.Date}
 	var err error
 	if st.TriageEnabled && s.triage != nil {
@@ -413,7 +429,7 @@ func (s *HelpdeskService) sendToUser(ctx context.Context, u *domain.HelpdeskUser
 		s.log.Debug("mirror auto message", "err", err)
 		return
 	}
-	_ = s.repo.SaveMessage(ctx, &domain.HelpdeskMessage{UserID: u.UserID, Direction: domain.HelpdeskOut,
+	_ = s.repo.SaveMessage(ctx, &domain.HelpdeskMessage{BotID: s.botDBID, UserID: u.UserID, Direction: domain.HelpdeskOut,
 		UserMsgID: msgID, GroupID: groupID, GroupMsgID: mirrorID})
 }
 
@@ -421,7 +437,7 @@ func (s *HelpdeskService) storeOutgoing(ctx context.Context, userID int64, msgID
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	if _, err := s.messages.Save(ctx, &domain.Message{ConnectionID: domain.HelpdeskConnectionID, ChatID: userID,
+	if _, err := s.messages.Save(ctx, &domain.Message{ConnectionID: domain.HelpdeskConnectionFor(s.botDBID), ChatID: userID,
 		MessageID: msgID, SenderID: operatorID, SenderName: supportSenderName, Outgoing: true, Text: text,
 		SentAt: time.Now(), Analyzed: true}); err != nil {
 		s.log.Warn("store outgoing helpdesk message", "user_id", userID, "err", err)
@@ -445,11 +461,11 @@ func IsInternalNote(raw string) bool {
 // OnOperatorMessage relays an operator's message from a topic to the user anonymously. Internal notes
 // ("//", "!") stay in the topic; "/1" creates a ticket from the replied message.
 func (s *HelpdeskService) OnOperatorMessage(ctx context.Context, in OperatorMessage) error {
-	st := s.settings.Get().Helpdesk
+	st := s.cfg.Get()
 	if !st.Active() || in.GroupID != st.GroupID || in.TopicID == 0 {
 		return nil
 	}
-	u, err := s.repo.UserByTopic(ctx, in.GroupID, in.TopicID)
+	u, err := s.repo.UserByTopic(ctx, s.botDBID, in.GroupID, in.TopicID)
 	if errors.Is(err, domain.ErrNotFound) {
 		return nil // General, the tickets topic or a topic created by hand
 	}
@@ -473,7 +489,7 @@ func (s *HelpdeskService) OnOperatorMessage(ctx context.Context, in OperatorMess
 	lock := s.userLock(u.UserID)
 	lock.Lock()
 	defer lock.Unlock()
-	if u, err = s.repo.GetUser(ctx, u.UserID); err != nil {
+	if u, err = s.repo.GetUser(ctx, s.botDBID, u.UserID); err != nil {
 		return err
 	}
 	return s.relayFromOperator(ctx, u, []OperatorMessage{in})
@@ -488,7 +504,7 @@ func (s *HelpdeskService) flushOperatorAlbum(ctx context.Context, userID int64, 
 	lock := s.userLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
-	u, err := s.repo.GetUser(ctx, userID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil {
 		s.log.Error("operator album: load user", "user_id", userID, "err", err)
 		return
@@ -507,7 +523,7 @@ func (s *HelpdeskService) relayFromOperator(ctx context.Context, u *domain.Helpd
 	}
 	replyTo := 0
 	if first.ReplyToID != 0 {
-		if m, err := s.repo.MessageByGroupMsg(ctx, first.GroupID, first.ReplyToID); err == nil && m.UserID == u.UserID {
+		if m, err := s.repo.MessageByGroupMsg(ctx, s.botDBID, first.GroupID, first.ReplyToID); err == nil && m.UserID == u.UserID {
 			replyTo = m.UserMsgID
 		}
 	}
@@ -531,7 +547,7 @@ func (s *HelpdeskService) relayFromOperator(ctx context.Context, u *domain.Helpd
 		if i >= len(copies) {
 			break
 		}
-		if err := s.repo.SaveMessage(ctx, &domain.HelpdeskMessage{UserID: u.UserID, Direction: domain.HelpdeskOut,
+		if err := s.repo.SaveMessage(ctx, &domain.HelpdeskMessage{BotID: s.botDBID, UserID: u.UserID, Direction: domain.HelpdeskOut,
 			UserMsgID: copies[i], GroupID: first.GroupID, GroupMsgID: m.MessageID, OperatorID: m.OperatorID, CreatedAt: now}); err != nil {
 			s.log.Warn("save message mapping", "err", err)
 		}
@@ -549,12 +565,12 @@ func (s *HelpdeskService) OnUserEdited(ctx context.Context, userID int64, messag
 	if !s.Active() {
 		return nil
 	}
-	m, err := s.repo.MessageByUserMsg(ctx, userID, messageID)
+	m, err := s.repo.MessageByUserMsg(ctx, s.botDBID, userID, messageID)
 	if err != nil || m.Direction != domain.HelpdeskIn {
 		return nil
 	}
 	if strings.TrimSpace(content) != "" {
-		if err := s.messages.UpdateText(ctx, domain.HelpdeskConnectionID, userID, messageID, content); err != nil {
+		if err := s.messages.UpdateText(ctx, domain.HelpdeskConnectionFor(s.botDBID), userID, messageID, content); err != nil {
 			s.log.Warn("update edited message", "err", err)
 		}
 	}
@@ -567,12 +583,12 @@ func (s *HelpdeskService) OnOperatorEdited(ctx context.Context, groupID int64, m
 	if s.GroupID() != groupID {
 		return nil
 	}
-	m, err := s.repo.MessageByGroupMsg(ctx, groupID, messageID)
+	m, err := s.repo.MessageByGroupMsg(ctx, s.botDBID, groupID, messageID)
 	if err != nil || m.Direction != domain.HelpdeskOut {
 		return nil
 	}
 	if strings.TrimSpace(content) != "" {
-		if err := s.messages.UpdateText(ctx, domain.HelpdeskConnectionID, m.UserID, m.UserMsgID, content); err != nil {
+		if err := s.messages.UpdateText(ctx, domain.HelpdeskConnectionFor(s.botDBID), m.UserID, m.UserMsgID, content); err != nil {
 			s.log.Warn("update edited message", "err", err)
 		}
 	}
@@ -581,14 +597,14 @@ func (s *HelpdeskService) OnOperatorEdited(ctx context.Context, groupID int64, m
 
 // OnTopicState syncs a topic closed or reopened by hand in Telegram.
 func (s *HelpdeskService) OnTopicState(ctx context.Context, groupID int64, topicID int, closed bool) error {
-	u, err := s.repo.UserByTopic(ctx, groupID, topicID)
+	u, err := s.repo.UserByTopic(ctx, s.botDBID, groupID, topicID)
 	if err != nil {
 		return nil
 	}
 	lock := s.userLock(u.UserID)
 	lock.Lock()
 	defer lock.Unlock()
-	if u, err = s.repo.GetUser(ctx, u.UserID); err != nil {
+	if u, err = s.repo.GetUser(ctx, s.botDBID, u.UserID); err != nil {
 		return err
 	}
 	u.TopicClosed = closed
@@ -600,7 +616,7 @@ func (s *HelpdeskService) OnTopicState(ctx context.Context, groupID int64, topic
 
 // OnUserBlocked records that the user blocked (or unblocked) the bot and tells the operators.
 func (s *HelpdeskService) OnUserBlocked(ctx context.Context, userID int64, blocked bool) error {
-	u, err := s.repo.GetUser(ctx, userID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil {
 		return nil
 	}
@@ -632,7 +648,7 @@ func (s *HelpdeskService) OnUserBlocked(ctx context.Context, userID int64, block
 // ---------- tickets ----------
 
 func (s *HelpdeskService) forceTicket(ctx context.Context, userID int64, in OperatorMessage) {
-	u, err := s.repo.GetUser(ctx, userID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil {
 		s.log.Error("force ticket: load user", "err", err)
 		return
@@ -658,7 +674,7 @@ func (s *HelpdeskService) ForceTicket(ctx context.Context, userID int64) (*domai
 	if !s.Active() {
 		return nil, domain.ErrHelpdeskOff
 	}
-	u, err := s.repo.GetUser(ctx, userID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -679,23 +695,23 @@ func (s *HelpdeskService) ForceTicket(ctx context.Context, userID int64) (*domai
 // user messages after the last answer.
 func (s *HelpdeskService) ticketMessages(ctx context.Context, u *domain.HelpdeskUser, groupID int64, replyTo int, replyText string) ([]domain.Message, error) {
 	if replyTo != 0 {
-		if hm, err := s.repo.MessageByGroupMsg(ctx, groupID, replyTo); err == nil && hm.UserID == u.UserID {
-			if dm, err := s.messages.Find(ctx, domain.HelpdeskConnectionID, u.UserID, hm.UserMsgID); err == nil {
+		if hm, err := s.repo.MessageByGroupMsg(ctx, s.botDBID, groupID, replyTo); err == nil && hm.UserID == u.UserID {
+			if dm, err := s.messages.Find(ctx, domain.HelpdeskConnectionFor(s.botDBID), u.UserID, hm.UserMsgID); err == nil {
 				return []domain.Message{*dm}, nil
 			}
 			if strings.TrimSpace(replyText) != "" {
-				return []domain.Message{{ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, MessageID: hm.UserMsgID,
+				return []domain.Message{{ConnectionID: domain.HelpdeskConnectionFor(s.botDBID), ChatID: u.UserID, MessageID: hm.UserMsgID,
 					SenderID: u.UserID, SenderName: u.Name, SenderUsername: u.Username, Text: replyText,
 					Outgoing: hm.Direction == domain.HelpdeskOut, SentAt: hm.CreatedAt}}, nil
 			}
 		}
 		if strings.TrimSpace(replyText) != "" {
-			return []domain.Message{{ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, SenderID: u.UserID,
+			return []domain.Message{{ConnectionID: domain.HelpdeskConnectionFor(s.botDBID), ChatID: u.UserID, SenderID: u.UserID,
 				SenderName: u.Name, SenderUsername: u.Username, Text: replyText, SentAt: time.Now()}}, nil
 		}
 		return nil, nil
 	}
-	history, err := s.messages.History(ctx, domain.HelpdeskConnectionID, u.UserID, math.MaxInt64, 30)
+	history, err := s.messages.History(ctx, domain.HelpdeskConnectionFor(s.botDBID), u.UserID, math.MaxInt64, 30)
 	if err != nil {
 		return nil, err
 	}
@@ -716,39 +732,39 @@ func (s *HelpdeskService) ticketMessages(ctx context.Context, u *domain.Helpdesk
 // ResolveForward finds the helpdesk user a message forwarded to the bot came from: directly by the
 // author, or — for a copy forwarded from a topic, whose author is the bot — by its time and text.
 func (s *HelpdeskService) ResolveForward(ctx context.Context, f ForwardedMessage) (*domain.HelpdeskUser, *domain.Message) {
-	st := s.settings.Get().Helpdesk
+	st := s.cfg.Get()
 	if !st.Active() {
 		return nil, nil
 	}
 	if f.OriginUserID != 0 && f.OriginUserID != s.botID {
-		u, err := s.repo.GetUser(ctx, f.OriginUserID)
+		u, err := s.repo.GetUser(ctx, s.botDBID, f.OriginUserID)
 		if err != nil {
 			return nil, nil
 		}
-		return u, &domain.Message{ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, SenderID: u.UserID,
+		return u, &domain.Message{ConnectionID: domain.HelpdeskConnectionFor(s.botDBID), ChatID: u.UserID, SenderID: u.UserID,
 			SenderName: u.Name, SenderUsername: u.Username, Text: f.Text, SentAt: f.OriginDate}
 	}
 	if f.OriginUserID != s.botID || f.OriginDate.IsZero() {
 		return nil, nil
 	}
-	cands, err := s.repo.MessagesAround(ctx, st.GroupID, f.OriginDate, 3*time.Second)
+	cands, err := s.repo.MessagesAround(ctx, s.botDBID, st.GroupID, f.OriginDate, 3*time.Second)
 	if err != nil || len(cands) == 0 {
 		return nil, nil
 	}
 	pick := func(hm domain.HelpdeskMessage) (*domain.HelpdeskUser, *domain.Message) {
-		u, err := s.repo.GetUser(ctx, hm.UserID)
+		u, err := s.repo.GetUser(ctx, s.botDBID, hm.UserID)
 		if err != nil {
 			return nil, nil
 		}
-		dm, err := s.messages.Find(ctx, domain.HelpdeskConnectionID, hm.UserID, hm.UserMsgID)
+		dm, err := s.messages.Find(ctx, domain.HelpdeskConnectionFor(s.botDBID), hm.UserID, hm.UserMsgID)
 		if err != nil {
-			dm = &domain.Message{ConnectionID: domain.HelpdeskConnectionID, ChatID: u.UserID, MessageID: hm.UserMsgID,
+			dm = &domain.Message{ConnectionID: domain.HelpdeskConnectionFor(s.botDBID), ChatID: u.UserID, MessageID: hm.UserMsgID,
 				SenderID: u.UserID, SenderName: u.Name, SenderUsername: u.Username, Text: f.Text, SentAt: hm.CreatedAt}
 		}
 		return u, dm
 	}
 	for _, hm := range cands {
-		if dm, err := s.messages.Find(ctx, domain.HelpdeskConnectionID, hm.UserID, hm.UserMsgID); err == nil &&
+		if dm, err := s.messages.Find(ctx, domain.HelpdeskConnectionFor(s.botDBID), hm.UserID, hm.UserMsgID); err == nil &&
 			strings.TrimSpace(dm.Text) == strings.TrimSpace(f.Text) {
 			return pick(hm)
 		}
@@ -809,7 +825,7 @@ func (s *HelpdeskService) QueueForwardTicket(operatorID int64, u *domain.Helpdes
 
 // ReplyToUser sends text to the user from the Mini App and mirrors it into the topic.
 func (s *HelpdeskService) ReplyToUser(ctx context.Context, userID int64, text string) error {
-	st := s.settings.Get().Helpdesk
+	st := s.cfg.Get()
 	if !st.Active() {
 		return domain.ErrHelpdeskOff
 	}
@@ -820,7 +836,7 @@ func (s *HelpdeskService) ReplyToUser(ctx context.Context, userID int64, text st
 	lock := s.userLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
-	u, err := s.repo.GetUser(ctx, userID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil {
 		return err
 	}
@@ -843,7 +859,7 @@ func (s *HelpdeskService) ReplyToUser(ctx context.Context, userID int64, text st
 		if err != nil {
 			s.log.Debug("mirror panel reply", "err", err)
 		} else {
-			_ = s.repo.SaveMessage(ctx, &domain.HelpdeskMessage{UserID: userID, Direction: domain.HelpdeskOut,
+			_ = s.repo.SaveMessage(ctx, &domain.HelpdeskMessage{BotID: s.botDBID, UserID: userID, Direction: domain.HelpdeskOut,
 				UserMsgID: msgID, GroupID: st.GroupID, GroupMsgID: mirrorID, OperatorID: actor.ID})
 		}
 	}
@@ -854,14 +870,14 @@ func (s *HelpdeskService) ReplyToUser(ctx context.Context, userID int64, text st
 
 // SetTopicClosed closes or reopens the user's topic from the Mini App.
 func (s *HelpdeskService) SetTopicClosed(ctx context.Context, userID int64, closed bool) (*domain.HelpdeskUser, error) {
-	st := s.settings.Get().Helpdesk
+	st := s.cfg.Get()
 	if !st.Active() {
 		return nil, domain.ErrHelpdeskOff
 	}
 	lock := s.userLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
-	u, err := s.repo.GetUser(ctx, userID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -879,19 +895,26 @@ func (s *HelpdeskService) SetTopicClosed(ctx context.Context, userID int64, clos
 	return u, s.repo.SaveUser(ctx, u)
 }
 
-// Users lists helpdesk users for the dialogs screen.
+// Users lists this bot's own helpdesk users for the dialogs screen.
 func (s *HelpdeskService) Users(ctx context.Context, f domain.HelpdeskUserFilter) ([]domain.HelpdeskUser, int, error) {
-	return s.repo.ListUsers(ctx, f)
+	return s.repo.ListUsers(ctx, &s.botDBID, f)
+}
+
+// UsersAcrossBots lists helpdesk users merged over every bot (the owner's cross-organization
+// dialogs view in the Mini App) — safe to call on any live HelpdeskService instance, since the
+// underlying repository is shared.
+func (s *HelpdeskService) UsersAcrossBots(ctx context.Context, f domain.HelpdeskUserFilter) ([]domain.HelpdeskUser, int, error) {
+	return s.repo.ListUsers(ctx, nil, f)
 }
 
 // User returns one helpdesk user.
 func (s *HelpdeskService) User(ctx context.Context, userID int64) (*domain.HelpdeskUser, error) {
-	return s.repo.GetUser(ctx, userID)
+	return s.repo.GetUser(ctx, s.botDBID, userID)
 }
 
 // Conversation returns the latest messages with the user, oldest first.
 func (s *HelpdeskService) Conversation(ctx context.Context, userID int64, limit int) ([]domain.Message, error) {
-	return s.messages.History(ctx, domain.HelpdeskConnectionID, userID, math.MaxInt64, limit)
+	return s.messages.History(ctx, domain.HelpdeskConnectionFor(s.botDBID), userID, math.MaxInt64, limit)
 }
 
 // TopicURL returns a link to the user's topic, empty when there is none in the current group.
@@ -934,7 +957,7 @@ func (s *HelpdeskService) IsOperator(ctx context.Context, userID int64) bool {
 
 // CheckGroup verifies the configured group (forum mode, bot rights).
 func (s *HelpdeskService) CheckGroup(ctx context.Context) (*GroupCheck, error) {
-	group := s.settings.Get().Helpdesk.GroupID
+	group := s.cfg.Get().GroupID
 	if group == 0 {
 		return nil, fmt.Errorf("%w: не указан ID супергруппы", domain.ErrInvalidInput)
 	}
@@ -988,7 +1011,7 @@ func (s *HelpdeskService) Cards(ctx context.Context, taskID int64) ([]domain.Hel
 
 // CheckReminders nudges operators in topics of users who wait for an answer too long.
 func (s *HelpdeskService) CheckReminders(ctx context.Context) {
-	h := s.settings.Get().Helpdesk
+	h := s.cfg.Get()
 	if !h.Active() || h.ReminderMinutes <= 0 {
 		return
 	}
@@ -996,7 +1019,7 @@ func (s *HelpdeskService) CheckReminders(ctx context.Context) {
 	if !h.InWorkingHours(now.In(s.settings.Location())) {
 		return
 	}
-	users, err := s.repo.DueReminders(ctx, now.Add(-time.Duration(h.ReminderMinutes)*time.Minute))
+	users, err := s.repo.DueReminders(ctx, s.botDBID, now.Add(-time.Duration(h.ReminderMinutes)*time.Minute))
 	if err != nil {
 		s.log.Error("load due reminders", "err", err)
 		return
@@ -1013,7 +1036,7 @@ func (s *HelpdeskService) remind(ctx context.Context, userID int64, h domain.Hel
 	lock := s.userLock(userID)
 	lock.Lock()
 	defer lock.Unlock()
-	u, err := s.repo.GetUser(ctx, userID)
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil || u.AwaitingSince == nil || !u.HasTopic(h.GroupID) {
 		return
 	}

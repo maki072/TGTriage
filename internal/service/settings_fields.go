@@ -41,6 +41,7 @@ type SettingGroup struct {
 // SettingGroups lists sections in display order.
 var SettingGroups = []SettingGroup{
 	{"helpdesk", "🎧 Хелпдеск"},
+	{"bots", "🏢 Боты организаций"},
 	{"ai", "🤖 AI-провайдеры"},
 	{"triage", "🎯 Триаж"},
 	{"general", "⚙️ Общие"},
