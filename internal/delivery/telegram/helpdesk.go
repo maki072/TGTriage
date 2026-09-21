@@ -407,14 +407,21 @@ func (b *Bot) ticketKeyboard(t *domain.Task, u *domain.HelpdeskUser, withTopicLi
 	return &telegram.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// panelTicketLink is the deep link that opens a ticket in the web panel via the bot's private chat
-// (empty while the panel has no public address).
-func (b *Bot) panelTicketLink(t *domain.Task) string {
+// panelLink is a link that opens the web panel from a group, where inline buttons cannot launch a
+// Mini App themselves: with a Main Mini App configured it opens the panel right away, otherwise it
+// leads to the bot's private chat, whose reply carries the launch button. param is "t<ticket id>" or
+// "tickets" (empty while the panel has no public address).
+func (b *Bot) panelLink(param string) string {
 	if b.settings.Get().WebAppPublicURL == "" || b.cfg.BotUsername == "" {
 		return ""
 	}
-	return fmt.Sprintf("https://t.me/%s?start=t%d", b.cfg.BotUsername, t.ID)
+	if b.cfg.MainWebApp {
+		return fmt.Sprintf("https://t.me/%s?startapp=%s", b.cfg.BotUsername, param)
+	}
+	return fmt.Sprintf("https://t.me/%s?start=%s", b.cfg.BotUsername, param)
 }
+
+func (b *Bot) panelTicketLink(t *domain.Task) string { return b.panelLink(fmt.Sprintf("t%d", t.ID)) }
 
 func (b *Bot) ticketUser(ctx context.Context, t *domain.Task) *domain.HelpdeskUser {
 	if !t.HasChat() {
@@ -575,15 +582,13 @@ func snoozePeriods(data func(opt string) string, back string) *telegram.InlineKe
 // groupCallback handles the buttons pressed by operators in the helpdesk group: ticket cards (hc),
 // spam buttons (hb), reminders (hr) and the tickets menu (hm).
 func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer func(string, bool)) error {
-	if len(p) >= 3 {
-		switch p[0] {
-		case "hb":
-			return b.banCallback(ctx, ref, p, answer)
-		case "hr":
-			return b.reminderCallback(ctx, ref, p, answer)
-		case "hm":
-			return b.menuCallback(ctx, ref, p, answer)
-		}
+	switch {
+	case len(p) >= 3 && p[0] == "hb":
+		return b.banCallback(ctx, ref, p, answer)
+	case len(p) >= 3 && p[0] == "hr":
+		return b.reminderCallback(ctx, ref, p, answer)
+	case len(p) >= 2 && p[0] == "hm": // "hm:r" has only two parts
+		return b.menuCallback(ctx, ref, p, answer)
 	}
 	if len(p) < 3 || p[0] != "hc" {
 		return nil

@@ -137,8 +137,8 @@ func (b *Bot) ticketsMenuView(ctx context.Context) (string, *telegram.InlineKeyb
 		row(cb(fmt.Sprintf("Все открытые · %d", o.New+o.InProgress+o.Snoozed), "hm:l:a:0")),
 	}
 	last := row(cb("Обновить", "hm:r"))
-	if b.settings.Get().WebAppPublicURL != "" && b.cfg.BotUsername != "" {
-		last = append(last, button{Text: "Веб-панель", URL: fmt.Sprintf("https://t.me/%s?start=panel", b.cfg.BotUsername)})
+	if link := b.panelLink("tickets"); link != "" {
+		last = append(last, button{Text: "Веб-панель", URL: link})
 	}
 	return text, kb(append(rows, last)...), nil
 }
@@ -168,8 +168,11 @@ func (b *Bot) ticketsListView(ctx context.Context, key string, page int) (string
 		rows = append(rows, row(cb("‹", fmt.Sprintf("hm:l:%s:%d", key, max(page-1, 0))), cb(fmt.Sprintf("%d / %d", page+1, pages), "noop"),
 			cb("›", fmt.Sprintf("hm:l:%s:%d", key, min(page+1, pages-1)))))
 	}
-	rows = append(rows, row(cb("‹ Меню", "hm:r")))
-	return sb.String(), kb(rows...), nil
+	last := row(cb("‹ Меню", "hm:r"))
+	if link := b.panelLink("tickets"); link != "" {
+		last = append(last, button{Text: "Веб-панель", URL: link})
+	}
+	return sb.String(), kb(append(rows, last)...), nil
 }
 
 // cardURL links to a ticket's card in the user's topic ("" when there is none).

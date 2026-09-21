@@ -85,6 +85,9 @@ type User struct {
 	LastName     string `json:"last_name,omitempty"`
 	Username     string `json:"username,omitempty"`
 	LanguageCode string `json:"language_code,omitempty"`
+	// HasMainWebApp is reported by getMe only: the bot has a Main Mini App (BotFather → Configure Mini App),
+	// so t.me/<bot>?startapp=<param> opens it directly, even from a group.
+	HasMainWebApp bool `json:"has_main_web_app,omitempty"`
 }
 
 // FullName returns "First Last" or a fallback.

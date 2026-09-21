@@ -147,14 +147,14 @@ func (m *botManager) runOne(ctx context.Context, b domain.Bot, rt *botRuntime) {
 		log.Error("bot getMe failed, not starting", "err", err)
 		return
 	}
-	log.Info("additional bot authorized", "username", me.Username, "telegram_bot_id", me.ID)
+	log.Info("additional bot authorized", "username", me.Username, "telegram_bot_id", me.ID, "main_web_app", me.HasMainWebApp)
 
 	gateway := tgbot.NewGateway(api, m.cfg.OwnerID, me.ID)
 	hd := service.NewHelpdeskService(m.store.Helpdesk, m.store.Messages, m.settings,
 		service.BotHelpdeskConfig(m.bots, b.ID), gateway, m.cfg.OwnerID, me.ID, b.ID, log)
 	hd.SetTriage(m.triage)
 	hd.SetTickets(m.tasks)
-	delivery := tgbot.New(api, tgbot.Config{OwnerID: m.cfg.OwnerID, BotID: me.ID, BotUsername: me.Username, BotDBID: b.ID},
+	delivery := tgbot.New(api, tgbot.Config{OwnerID: m.cfg.OwnerID, BotID: me.ID, BotUsername: me.Username, MainWebApp: me.HasMainWebApp, BotDBID: b.ID},
 		m.tasks, m.settings, m.conns, hd, log)
 	delivery.SetTriage(m.triage)
 	hd.Start(ctx)

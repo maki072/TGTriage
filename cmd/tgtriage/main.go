@@ -157,7 +157,7 @@ func run(cfg *config.Config, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("telegram getMe: %w", err)
 	}
-	log.Info("bot authorized", "username", me.Username, "bot_id", me.ID)
+	log.Info("bot authorized", "username", me.Username, "bot_id", me.ID, "main_web_app", me.HasMainWebApp)
 
 	conns := service.NewConnectionService(store.Connections, cfg.OwnerID)
 	gateway := tgbot.NewGateway(api, cfg.OwnerID, me.ID)
@@ -165,7 +165,7 @@ func run(cfg *config.Config, log *slog.Logger) error {
 	helpdesk := service.NewHelpdeskService(store.Helpdesk, store.Messages, settings, service.GlobalHelpdeskConfig(settings),
 		gateway, cfg.OwnerID, me.ID, 0, log)
 	tasks.SetHelpdesk(helpdesk)
-	bot := tgbot.New(api, tgbot.Config{OwnerID: cfg.OwnerID, BotID: me.ID, BotUsername: me.Username},
+	bot := tgbot.New(api, tgbot.Config{OwnerID: cfg.OwnerID, BotID: me.ID, BotUsername: me.Username, MainWebApp: me.HasMainWebApp},
 		tasks, settings, conns, helpdesk, log)
 	tasks.SetObserver(bot)
 	triage := service.NewTriageService(store.Messages, store.Tasks, store.Analyses, conns, settings, botsSvc, registry, bot, log)

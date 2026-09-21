@@ -17,6 +17,8 @@ type Config struct {
 	OwnerID     int64
 	BotID       int64
 	BotUsername string
+	// MainWebApp: the bot has a Main Mini App, so group buttons can open the panel directly.
+	MainWebApp bool
 	// BotDBID is 0 for the main bot (from .env), or the row id in the bots table for an
 	// additional, client-organization bot added from the Mini App.
 	BotDBID int64

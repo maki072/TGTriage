@@ -13,8 +13,9 @@
   await loadBots();
   const params = new URLSearchParams(location.search);
   const startParam = tg && tg.initDataUnsafe ? tg.initDataUnsafe.start_param : '';
-  const taskID = Number(params.get('task') || (startParam && startParam.startsWith('t') ? startParam.slice(1) : 0));
-  state.tab = taskID ? 'tasks' : tabsForMe()[0][0];
+  // start_param: "t<id>" opens a ticket, "tickets" the ticket list (links from the helpdesk group)
+  const taskID = Number(params.get('task') || (/^t\d+$/.test(startParam || '') ? startParam.slice(1) : 0));
+  state.tab = taskID || startParam === 'tickets' ? 'tasks' : tabsForMe()[0][0];
   if (taskID) openView({ type: 'task', id: taskID });
   else render();
   refreshAwaiting();
