@@ -408,6 +408,9 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	log.Info("triage result", "helpdesk", helpdesk, "provider", rec.Provider, "model", rec.Model, "type", analysis.MessageType,
 		"is_task", analysis.IsTask, "confidence", analysis.Confidence, "threshold", threshold,
 		"update_task_id", analysis.UpdateTaskID, "latency_ms", rec.LatencyMs)
+	if helpdesk && analysis.MessageType == "spam" {
+		s.warnSpam(ctx, b.key.connID, b.key.chatID, analysis)
+	}
 	if !analysis.IsTask || analysis.Confidence < threshold {
 		return nil
 	}
@@ -826,4 +829,21 @@ func telegramIDs(msgs []domain.Message) []int {
 		ids = append(ids, m.MessageID)
 	}
 	return ids
+}
+
+// SpamNotifier is implemented by Notifiers that can warn the operators about a likely spammer.
+type SpamNotifier interface {
+	SpamSuspected(ctx context.Context, userID int64, conf float64, reason string)
+}
+
+// warnSpam tells the operators of a helpdesk bot that the model took a message of the user for
+// spam. It only warns — the notifier decides whether the user is still unverified — and never bans.
+func (s *TriageService) warnSpam(ctx context.Context, connID string, userID int64, a *domain.Analysis) {
+	n, ok := s.notifiers.For(domain.ParseHelpdeskBotID(connID))
+	if !ok {
+		return
+	}
+	if sn, ok := n.(SpamNotifier); ok {
+		sn.SpamSuspected(ctx, userID, a.Confidence, a.Reasoning)
+	}
 }

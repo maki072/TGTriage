@@ -3,6 +3,7 @@ package tgbot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ func (b *Bot) onUserPrivate(ctx context.Context, m *telegram.Message) {
 	in := service.UserMessage{
 		UserID: m.From.ID, Name: m.From.FullName(), Username: m.From.Username, LanguageCode: m.From.LanguageCode,
 		MessageID: m.MessageID, MediaGroupID: m.MediaGroupID, Date: time.Unix(m.Date, 0),
+		Forwarded: m.ForwardOrigin != nil,
 	}
 	if cmd, arg := parseCommand(m.Text); cmd == "/start" {
 		in.Start, in.StartParam = true, sanitizeStartParam(arg)
@@ -550,25 +552,85 @@ func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer
 	return nil
 }
 
-// banCallback handles the spam button on a user's topic header: hb:ban:<user id> / hb:unban:<user id>.
+// banCallback handles the spam buttons on a user's topic header and quarantine card:
+// hb:ban:<user id>, hb:unban:<user id>, hb:ok:<user id> (approve a held user) and hb:noop:0.
 func (b *Bot) banCallback(ctx context.Context, ref *msgRef, p []string, answer func(string, bool)) error {
+	if p[1] == "noop" {
+		return nil
+	}
 	userID, err := strconv.ParseInt(p[2], 10, 64)
-	if err != nil || (p[1] != "ban" && p[1] != "unban") {
+	if err != nil {
 		return domain.ErrInvalidInput
 	}
-	ban := p[1] == "ban"
-	if _, err := b.helpdesk.SetBanned(ctx, userID, ban); err != nil {
-		return err
+	var (
+		notice string
+		markup *telegram.InlineKeyboardMarkup
+	)
+	switch p[1] {
+	case "ban", "unban":
+		ban := p[1] == "ban"
+		if _, err := b.helpdesk.SetBanned(ctx, userID, ban); err != nil {
+			return err
+		}
+		notice, markup = "Разбанен", spamKeyboard(userID, false)
+		if ban {
+			notice, markup = "Забанен как спам", spamKeyboard(userID, true)
+		}
+	case "ok":
+		if err := b.helpdesk.Approve(ctx, userID); err != nil {
+			return err
+		}
+		by := service.ActorFrom(ctx).Name
+		notice, markup = "Пропущено", kb(row(cb(trunc("✅ Пропущено · "+by, 40), "hb:noop:0")))
+	default:
+		return domain.ErrInvalidInput
 	}
-	if ban {
-		answer("Забанен как спам", false)
-	} else {
-		answer("Разбанен", false)
-	}
+	answer(notice, false)
 	if ref != nil {
-		if err := b.api.EditMessageReplyMarkup(ctx, ref.ChatID, ref.MessageID, spamKeyboard(userID, ban)); err != nil && !telegram.IsNotModified(err) {
+		if err := b.api.EditMessageReplyMarkup(ctx, ref.ChatID, ref.MessageID, markup); err != nil && !telegram.IsNotModified(err) {
 			b.log.Debug("update spam button", "err", err)
 		}
 	}
 	return nil
+}
+
+// captchaPassed handles the "I am not a bot" button pressed by a user in the private chat.
+func (b *Bot) captchaPassed(ctx context.Context, q *telegram.CallbackQuery, answer func(string, bool)) {
+	err := b.helpdesk.PassCaptcha(ctx, q.From.ID)
+	switch {
+	case err == nil:
+		answer("Спасибо!", false)
+		if q.Message != nil {
+			if err := b.api.EditMessageText(ctx, telegram.EditMessageTextParams{ChatID: q.Message.Chat.ID, MessageID: q.Message.MessageID,
+				Text: "✅ Проверка пройдена — сообщение передано в поддержку."}); err != nil && !telegram.IsNotModified(err) {
+				b.log.Debug("edit captcha prompt", "err", err)
+			}
+		}
+	case errors.Is(err, domain.ErrNotFound):
+		answer("Проверка уже пройдена", false)
+	default:
+		b.log.Warn("pass captcha", "user_id", q.From.ID, "err", err)
+		answer("Не получилось, попробуйте ещё раз", true)
+	}
+}
+
+// SpamSuspected implements service.SpamNotifier: warns the operators in the user's topic that the
+// LLM took a message of a new user for spam, with the ban button. Nothing is banned automatically.
+func (b *Bot) SpamSuspected(ctx context.Context, userID int64, conf float64, reason string) {
+	u, ok := b.helpdesk.SuspectSpam(ctx, userID, conf)
+	if !ok {
+		return
+	}
+	group := b.helpdesk.GroupID()
+	if group == 0 || !u.HasTopic(group) {
+		return
+	}
+	text := "⚠️ <b>Похоже на спам</b> — так решил AI (уверенность " + fmt.Sprintf("%.0f%%", conf*100) + ")"
+	if reason = trunc(reason, 300); reason != "" {
+		text += "\n<i>" + esc(reason) + "</i>"
+	}
+	if _, err := b.api.SendMessage(ctx, telegram.SendMessageParams{ChatID: group, MessageThreadID: u.TopicID, Text: text,
+		ParseMode: "HTML", ReplyMarkup: spamKeyboard(userID, false)}); err != nil {
+		b.log.Debug("post spam warning", "err", err)
+	}
 }

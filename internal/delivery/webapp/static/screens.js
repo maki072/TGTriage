@@ -618,6 +618,7 @@ async function openMergePicker(t) {
 function userBadges(u) {
   const b = [];
   if (u.awaiting_since) b.push(badge('ждёт ' + esc(waitedFor(u.awaiting_since)), { tone: 'warning', icon: 'clock' }));
+  if (u.hold) b.push(badge(u.hold === 'captcha' ? 'ждёт капчу' : 'на проверке', { tone: 'warning', icon: 'alert' }));
   if (u.banned) b.push(badge('спам' + (u.banned_at ? ' · ' + esc(fmtDT(u.banned_at)) : ''), { tone: 'danger', icon: 'ban' }));
   if (u.blocked) b.push(badge('заблокировал бота', { tone: 'danger', icon: 'ban' }));
   if (u.topic_closed) b.push(badge('тема закрыта', { icon: 'lock' }));
@@ -714,11 +715,14 @@ async function renderDialog(userID, botID, tok) {
   const open = d.tickets.filter(t => isOpen(t.status));
   app.innerHTML =
     (u.banned ? banner('Пользователь забанен как спам: его сообщения игнорируются', 'danger') : '') +
+    (u.hold ? banner(u.hold === 'captcha' ? 'Пользователь ещё не прошёл капчу — его сообщения ждут' : 'Сообщения новичка на проверке: похоже на спам. Пропустите или забаньте.', 'warning') : '') +
     `<div class="tr-card"><div class="tr-profile">${avatar(u.name, 'lg')}<div class="tr-profile__text"><b>${esc(u.name)}</b><span class="tr-cap">${u.username ? `<a class="tr-link" href="#" data-act="link" data-link="${esc(u.profile_url)}">@${esc(u.username)}</a>` : 'без username'}${u.language_code ? ' · ' + esc(u.language_code) : ''}</span></div></div>` +
     (userBadges(u) ? `<div class="tr-row" style="margin-top:12px">${userBadges(u)}</div>` : '') + `</div>` +
     (d.tickets.length ? `<section><h3 class="tr-overline">Тикеты · ${open.length} открыто</h3><div class="tr-list">${d.tickets.map(t => taskCard(t)).join('')}</div></section>` : '') +
+    (d.held && d.held.length ? `<section><h3 class="tr-overline">Ждут решения · ${d.held.length}</h3><div class="tr-chat">${d.held.map(bubble).join('')}</div></section>` : '') +
     `<section><h3 class="tr-overline">Переписка</h3><div class="tr-chat" id="chat">${d.messages.length ? d.messages.map(bubble).join('') : emptyState('message', 'Сообщений нет', '')}</div></section>`;
   setBottom(u.banned ? `<div class="tr-composer">${btn('Разбанить', { v: 'primary', block: true, icon: 'unlock', act: 'hd-unban' })}</div>`
+    : u.hold ? `<div class="tr-composer">${btn('Пропустить', { v: 'primary', block: true, icon: 'check-circle', act: 'hd-approve' })}${btn('Спам', { v: 'danger', icon: 'ban', act: 'hd-ban' })}</div>`
     : `<div class="tr-composer"><textarea id="hdReply" rows="1" placeholder="Ответ — уйдёт от имени бота" aria-label="Сообщение"></textarea>${ibtn('send', 'Отправить', { tone: 'fill', id: 'hdSend', act: 'hd-send', disabled: true })}</div>`);
   window.scrollTo(0, document.body.scrollHeight);
 }
@@ -756,3 +760,9 @@ ACT['dialog-menu'] = () => {
   openMenu(u.name || 'Диалог', items);
 };
 ACT['hd-unban'] = el => { const { userID, botID } = state.dialog; withBusy(el, () => setBanned(userID, botID, false)); };
+ACT['hd-approve'] = el => { const { userID, botID } = state.dialog; withBusy(el, async () => { await api('POST', `/api/helpdesk/users/${userID}/approve?bot=${botID}`); toast('Пропущено'); render(); }); };
+ACT['hd-ban'] = async () => {
+  const { userID, botID } = state.dialog;
+  if (!await confirmSheet('Забанить как спам?', 'Сообщения на проверке будут удалены, бот перестанет принимать сообщения этого пользователя.', 'Забанить', true)) return;
+  try { await setBanned(userID, botID, true); } catch (e) { toast(e.message, { error: true }); }
+};

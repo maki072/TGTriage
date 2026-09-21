@@ -38,6 +38,10 @@ func (b *Bot) onCallback(ctx context.Context, q *telegram.CallbackQuery) {
 
 	ctx = service.WithActor(ctx, service.Actor{ID: q.From.ID, Name: q.From.FullName()})
 	parts := strings.Split(q.Data, ":")
+	if len(parts) == 1 && parts[0] == captchaCallback && q.From.ID != b.cfg.OwnerID && q.Message != nil && q.Message.Chat.Type == "private" {
+		b.captchaPassed(ctx, q, answer)
+		return
+	}
 	if q.Message != nil && q.Message.Chat.ID != 0 && q.Message.Chat.ID == b.helpdesk.GroupID() {
 		// ticket cards in the helpdesk group: every member of the group is an operator
 		if err := b.groupCallback(ctx, groupRef(q), parts, answer); err != nil {

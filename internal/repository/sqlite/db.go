@@ -282,6 +282,28 @@ var migrations = [][]string{
 		`ALTER TABLE hd_users ADD COLUMN banned_at INTEGER NOT NULL DEFAULT 0`,
 		`CREATE INDEX idx_hd_users_banned ON hd_users (bot_id, banned)`,
 	},
+	// v6: anti-spam — new users may be held (captcha / review), held messages wait in hd_held.
+	// Everyone who already wrote to a bot counts as verified.
+	{
+		`ALTER TABLE hd_users ADD COLUMN verified INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE hd_users ADD COLUMN hold TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE hd_users ADD COLUMN spam_flagged INTEGER NOT NULL DEFAULT 0`,
+		`UPDATE hd_users SET verified = 1`,
+		`CREATE TABLE hd_held (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			bot_id         INTEGER NOT NULL DEFAULT 0,
+			user_id        INTEGER NOT NULL,
+			message_id     INTEGER NOT NULL,
+			media_group_id TEXT NOT NULL DEFAULT '',
+			reply_to_id    INTEGER NOT NULL DEFAULT 0,
+			text           TEXT NOT NULL DEFAULT '',
+			sent_at        INTEGER NOT NULL,
+			created_at     INTEGER NOT NULL
+		)`,
+		`CREATE INDEX idx_hd_held_user ON hd_held (bot_id, user_id)`,
+		`ALTER TABLE bots ADD COLUMN hd_spam_screen INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE bots ADD COLUMN hd_spam_captcha INTEGER NOT NULL DEFAULT 0`,
+	},
 }
 
 // Backup writes a consistent, compacted copy of the database to path (which must not exist).

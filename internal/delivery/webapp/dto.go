@@ -134,6 +134,8 @@ type HelpdeskUser struct {
 	Blocked       bool    `json:"blocked"`
 	Banned        bool    `json:"banned"`
 	BannedAt      *string `json:"banned_at"`
+	Hold          string  `json:"hold"` // "captcha" / "review" while the user's messages are held
+	Verified      bool    `json:"verified"`
 	AwaitingSince *string `json:"awaiting_since"`
 	LastMessageAt *string `json:"last_message_at"`
 	CreatedAt     string  `json:"created_at"`
@@ -142,7 +144,7 @@ type HelpdeskUser struct {
 func toHDUserDTO(u *domain.HelpdeskUser, topicURL string, loc *time.Location) HelpdeskUser {
 	return HelpdeskUser{
 		UserID: u.UserID, BotID: u.BotID, Name: u.Name, Username: u.Username, LanguageCode: u.LanguageCode, Source: u.Source,
-		ProfileURL: profileURL(u.Username, u.UserID), TopicURL: topicURL, TopicClosed: u.TopicClosed, Blocked: u.Blocked, Banned: u.Banned, BannedAt: fmtTimePtr(u.BannedAt, loc),
+		ProfileURL: profileURL(u.Username, u.UserID), TopicURL: topicURL, TopicClosed: u.TopicClosed, Blocked: u.Blocked, Banned: u.Banned, BannedAt: fmtTimePtr(u.BannedAt, loc), Hold: u.Hold, Verified: u.Verified,
 		AwaitingSince: fmtTimePtr(u.AwaitingSince, loc), LastMessageAt: fmtTimePtr(u.LastMessageAt, loc),
 		CreatedAt: fmtTime(u.CreatedAt, loc),
 	}
@@ -168,6 +170,7 @@ func toDialogMessages(msgs []domain.Message, loc *time.Location) []DialogMessage
 type HelpdeskDialog struct {
 	User     HelpdeskUser    `json:"user"`
 	Messages []DialogMessage `json:"messages"`
+	Held     []DialogMessage `json:"held"` // messages waiting for a decision (captcha / quarantine)
 	Tickets  []Task          `json:"tickets"`
 }
 
@@ -269,6 +272,8 @@ type BotHelpdesk struct {
 	HoursDays        string `json:"hours_days"`
 	OffHoursText     string `json:"offhours_text"`
 	ReminderMinutes  int    `json:"reminder_minutes"`
+	SpamScreen       bool   `json:"spam_screen"`
+	SpamCaptcha      bool   `json:"spam_captcha"`
 }
 
 func toBotDTO(b domain.Bot) Bot {
@@ -281,7 +286,7 @@ func toBotDTO(b domain.Bot) Bot {
 			GreetingEnabled: h.GreetingEnabled, GreetingText: h.GreetingText,
 			AutoReplyEnabled: h.AutoReplyEnabled, AutoReplyText: h.AutoReplyText,
 			HoursEnabled: h.HoursEnabled, HoursStart: h.HoursStart, HoursEnd: h.HoursEnd, HoursDays: h.HoursDays,
-			OffHoursText: h.OffHoursText, ReminderMinutes: h.ReminderMinutes,
+			OffHoursText: h.OffHoursText, ReminderMinutes: h.ReminderMinutes, SpamScreen: h.SpamScreen, SpamCaptcha: h.SpamCaptcha,
 		},
 	}
 }
@@ -354,4 +359,12 @@ func applyChain(s *domain.Settings, rows []aiKeyPatch) {
 		chain = append(chain, domain.AIKey{Provider: e.Provider, Key: key})
 	}
 	s.AIChain = chain
+}
+
+func toHeldMessages(msgs []domain.HeldMessage, loc *time.Location) []DialogMessage {
+	out := make([]DialogMessage, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, DialogMessage{ID: m.ID, Text: m.Text, SentAt: fmtTime(m.SentAt, loc)})
+	}
+	return out
 }

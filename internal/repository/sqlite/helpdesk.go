@@ -16,16 +16,16 @@ type HelpdeskRepo struct{ db *sql.DB }
 
 var _ domain.HelpdeskRepository = (*HelpdeskRepo)(nil)
 
-const hdUserColumns = `bot_id, user_id, name, username, language_code, source, group_id, topic_id, topic_closed, blocked, banned, banned_at,
+const hdUserColumns = `bot_id, user_id, name, username, language_code, source, group_id, topic_id, topic_closed, blocked, banned, banned_at, verified, hold, spam_flagged,
 	awaiting_since, reminded_at, last_message_at, created_at, updated_at`
 
 func scanHDUser(sc interface{ Scan(...any) error }) (domain.HelpdeskUser, error) {
 	var (
 		u                                           domain.HelpdeskUser
-		closed, blocked, banned                     int
+		closed, blocked, banned, verified, flagged  int
 		bannedAt, awaiting, reminded, last, cr, upd int64
 	)
-	err := sc.Scan(&u.BotID, &u.UserID, &u.Name, &u.Username, &u.LanguageCode, &u.Source, &u.GroupID, &u.TopicID, &closed, &blocked, &banned, &bannedAt,
+	err := sc.Scan(&u.BotID, &u.UserID, &u.Name, &u.Username, &u.LanguageCode, &u.Source, &u.GroupID, &u.TopicID, &closed, &blocked, &banned, &bannedAt, &verified, &u.Hold, &flagged,
 		&awaiting, &reminded, &last, &cr, &upd)
 	if err != nil {
 		return u, err
@@ -33,6 +33,8 @@ func scanHDUser(sc interface{ Scan(...any) error }) (domain.HelpdeskUser, error)
 	u.TopicClosed = closed == 1
 	u.Blocked = blocked == 1
 	u.Banned = banned == 1
+	u.Verified = verified == 1
+	u.SpamFlagged = flagged == 1
 	u.BannedAt = ptrFromUnix(bannedAt)
 	u.AwaitingSince = ptrFromUnix(awaiting)
 	u.RemindedAt = ptrFromUnix(reminded)
@@ -68,14 +70,15 @@ func (r *HelpdeskRepo) SaveUser(ctx context.Context, u *domain.HelpdeskUser) err
 		u.CreatedAt = now
 	}
 	u.UpdatedAt = now
-	_, err := r.db.ExecContext(ctx, `INSERT INTO hd_users (`+hdUserColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO hd_users (`+hdUserColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (bot_id, user_id) DO UPDATE SET
 			name = excluded.name, username = excluded.username, language_code = excluded.language_code,
 			source = excluded.source, group_id = excluded.group_id, topic_id = excluded.topic_id,
 			topic_closed = excluded.topic_closed, blocked = excluded.blocked, banned = excluded.banned,
-			banned_at = excluded.banned_at, awaiting_since = excluded.awaiting_since,
+			banned_at = excluded.banned_at, verified = excluded.verified, hold = excluded.hold, spam_flagged = excluded.spam_flagged,
+			awaiting_since = excluded.awaiting_since,
 			reminded_at = excluded.reminded_at, last_message_at = excluded.last_message_at, updated_at = excluded.updated_at`,
-		u.BotID, u.UserID, u.Name, u.Username, u.LanguageCode, u.Source, u.GroupID, u.TopicID, boolInt(u.TopicClosed), boolInt(u.Blocked), boolInt(u.Banned), ptrToUnix(u.BannedAt),
+		u.BotID, u.UserID, u.Name, u.Username, u.LanguageCode, u.Source, u.GroupID, u.TopicID, boolInt(u.TopicClosed), boolInt(u.Blocked), boolInt(u.Banned), ptrToUnix(u.BannedAt), boolInt(u.Verified), u.Hold, boolInt(u.SpamFlagged),
 		ptrToUnix(u.AwaitingSince), ptrToUnix(u.RemindedAt), ptrToUnix(u.LastMessageAt), toUnix(u.CreatedAt), toUnix(u.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("save helpdesk user: %w", err)
@@ -255,4 +258,49 @@ func (r *HelpdeskRepo) Cards(ctx context.Context, taskID int64) ([]domain.Helpde
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (r *HelpdeskRepo) AddHeld(ctx context.Context, m *domain.HeldMessage) error {
+	res, err := r.db.ExecContext(ctx, `INSERT INTO hd_held (bot_id, user_id, message_id, media_group_id, reply_to_id, text, sent_at, created_at)
+		VALUES (?,?,?,?,?,?,?,?)`, m.BotID, m.UserID, m.MessageID, m.MediaGroupID, m.ReplyToID, m.Text, toUnix(m.SentAt), time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("add held message: %w", err)
+	}
+	m.ID, err = res.LastInsertId()
+	return err
+}
+
+func (r *HelpdeskRepo) HeldMessages(ctx context.Context, botID, userID int64) ([]domain.HeldMessage, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, bot_id, user_id, message_id, media_group_id, reply_to_id, text, sent_at
+		FROM hd_held WHERE bot_id = ? AND user_id = ? ORDER BY id`, botID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("held messages: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.HeldMessage
+	for rows.Next() {
+		var (
+			m    domain.HeldMessage
+			sent int64
+		)
+		if err := rows.Scan(&m.ID, &m.BotID, &m.UserID, &m.MessageID, &m.MediaGroupID, &m.ReplyToID, &m.Text, &sent); err != nil {
+			return nil, err
+		}
+		m.SentAt = fromUnix(sent)
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (r *HelpdeskRepo) DeleteHeld(ctx context.Context, botID, userID int64) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM hd_held WHERE bot_id = ? AND user_id = ?`, botID, userID)
+	return err
+}
+
+func (r *HelpdeskRepo) DeleteHeldOlderThan(ctx context.Context, before time.Time) (int64, error) {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM hd_held WHERE created_at < ?`, before.Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

@@ -469,13 +469,18 @@ func (s *Server) handleHDUser(w http.ResponseWriter, r *http.Request) {
 		handleErr(w, err)
 		return
 	}
+	held, err := hd.HeldMessages(r.Context(), id)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
 	tickets, _, err := s.tasks.List(r.Context(), domain.TaskFilter{ConnectionID: domain.HelpdeskConnectionFor(botID), ChatID: id, Limit: 50})
 	if err != nil {
 		handleErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, HelpdeskDialog{
-		User: s.hdUserDTO(u), Messages: toDialogMessages(msgs, s.loc()), Tickets: toTaskDTOs(tickets, s.loc()),
+		User: s.hdUserDTO(u), Messages: toDialogMessages(msgs, s.loc()), Held: toHeldMessages(held, s.loc()), Tickets: toTaskDTOs(tickets, s.loc()),
 	})
 }
 
@@ -741,6 +746,8 @@ type botHelpdeskPatch struct {
 	HoursDays        *string `json:"hours_days"`
 	OffHoursText     *string `json:"offhours_text"`
 	ReminderMinutes  *int    `json:"reminder_minutes"`
+	SpamScreen       *bool   `json:"spam_screen"`
+	SpamCaptcha      *bool   `json:"spam_captcha"`
 }
 
 func (s *Server) handleBotPatch(w http.ResponseWriter, r *http.Request) {
@@ -809,6 +816,8 @@ func (s *Server) handleBotPatch(w http.ResponseWriter, r *http.Request) {
 			setS(&hd.HoursDays, h.HoursDays)
 			setS(&hd.OffHoursText, h.OffHoursText)
 			setI(&hd.ReminderMinutes, h.ReminderMinutes)
+			setB(&hd.SpamScreen, h.SpamScreen)
+			setB(&hd.SpamCaptcha, h.SpamCaptcha)
 		}
 	})
 	if err != nil {
@@ -882,6 +891,30 @@ func (s *Server) handleHDBan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := hd.SetBanned(r.Context(), id, body.Banned)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.hdUserDTO(u))
+}
+
+// handleHDApprove lets a held (captcha / quarantine) user through and relays their messages.
+func (s *Server) handleHDApprove(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	hd, _, ok := s.helpdeskFor(r)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "бот сейчас не запущен")
+		return
+	}
+	if err := hd.Approve(r.Context(), id); err != nil {
+		handleErr(w, err)
+		return
+	}
+	u, err := hd.User(r.Context(), id)
 	if err != nil {
 		handleErr(w, err)
 		return

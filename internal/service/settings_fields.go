@@ -387,6 +387,12 @@ func buildFields() []SettingField {
 		intField("helpdesk.reminder_minutes", "", "helpdesk", "Напоминание о неотвеченных, мин",
 			"Бот пишет в тему, если пользователь ждёт ответа дольше. 0 — выключено", "15", 0, 1440,
 			func(s *domain.Settings) *int { return &hd(s).ReminderMinutes }),
+		boolField("helpdesk.spam_screen", "", "helpdesk", "Проверка новых пользователей на спам",
+			"Сообщения новичков со ссылками, @упоминаниями, пересылками или на китайском/арабском/корейском и т. п. не доходят до операторов сразу, а ждут решения в теме «Карантин»", "true",
+			func(s *domain.Settings) *bool { return &hd(s).SpamScreen }),
+		boolField("helpdesk.spam_captcha", "", "helpdesk", "Капча для новых пользователей",
+			"Новый пользователь должен нажать «Я не бот», прежде чем его сообщение дойдёт до операторов", "false",
+			func(s *domain.Settings) *bool { return &hd(s).SpamCaptcha }),
 	)
 
 	// AI

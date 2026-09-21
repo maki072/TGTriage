@@ -214,3 +214,29 @@ func (g *Gateway) SendUserHeader(ctx context.Context, groupID int64, topicID int
 	}
 	return m.MessageID, nil
 }
+
+// captchaCallback is the callback data of the "I am not a bot" button.
+const captchaCallback = "cv"
+
+func (g *Gateway) SendCaptcha(ctx context.Context, userID int64, text string) (int, error) {
+	m, err := g.api.SendMessage(ctx, telegram.SendMessageParams{ChatID: userID, Text: text,
+		ReplyMarkup: kb(row(cb("Я не бот", captchaCallback)))})
+	if err != nil {
+		return 0, wrap(userID, err)
+	}
+	return m.MessageID, nil
+}
+
+// quarantineKeyboard is the keyboard of a held user's card: hb:ok:<user id> / hb:ban:<user id>.
+func quarantineKeyboard(userID int64) *telegram.InlineKeyboardMarkup {
+	return kb(row(cb("✅ Пропустить", fmt.Sprintf("hb:ok:%d", userID)), cb("🚫 Спам", spamCallback(userID, true))))
+}
+
+func (g *Gateway) SendQuarantineCard(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error) {
+	m, err := g.api.SendMessage(ctx, telegram.SendMessageParams{ChatID: groupID, MessageThreadID: topicID, Text: text,
+		ParseMode: "HTML", ReplyMarkup: quarantineKeyboard(userID), LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true}})
+	if err != nil {
+		return 0, wrap(groupID, err)
+	}
+	return m.MessageID, nil
+}

@@ -87,3 +87,46 @@ func TestHelpdeskRepo(t *testing.T) {
 		t.Errorf("backup: %v", err)
 	}
 }
+
+func TestHelpdeskRepoBanAndHold(t *testing.T) {
+	ctx := context.Background()
+	r := openTestStore(t).Helpdesk
+
+	now := time.Now()
+	u := &domain.HelpdeskUser{UserID: 20, Name: "Спамер", Banned: true, BannedAt: &now, Hold: domain.HoldReview, SpamFlagged: true}
+	ok := &domain.HelpdeskUser{UserID: 21, Name: "Клиент", Verified: true}
+	for _, x := range []*domain.HelpdeskUser{u, ok} {
+		if err := r.SaveUser(ctx, x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := r.GetUser(ctx, 0, 20)
+	if err != nil || !got.Banned || got.BannedAt == nil || got.Hold != domain.HoldReview || !got.SpamFlagged || got.Verified {
+		t.Fatalf("ban/hold fields must round-trip: %+v err=%v", got, err)
+	}
+	if list, total, _ := r.ListUsers(ctx, nil, domain.HelpdeskUserFilter{}); total != 1 || list[0].UserID != 21 {
+		t.Errorf("regular list must leave banned users out: %+v", list)
+	}
+	if list, total, _ := r.ListUsers(ctx, nil, domain.HelpdeskUserFilter{BannedOnly: true}); total != 1 || list[0].UserID != 20 {
+		t.Errorf("banned list: %+v", list)
+	}
+
+	for i := 1; i <= 2; i++ {
+		if err := r.AddHeld(ctx, &domain.HeldMessage{UserID: 20, MessageID: i, Text: "hi", SentAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held, err := r.HeldMessages(ctx, 0, 20)
+	if err != nil || len(held) != 2 || held[0].MessageID != 1 || held[1].Text != "hi" {
+		t.Fatalf("held messages in order: %+v err=%v", held, err)
+	}
+	if n, _ := r.DeleteHeldOlderThan(ctx, now.Add(-time.Hour)); n != 0 {
+		t.Error("fresh held messages must be kept")
+	}
+	if err := r.DeleteHeld(ctx, 0, 20); err != nil {
+		t.Fatal(err)
+	}
+	if held, _ := r.HeldMessages(ctx, 0, 20); len(held) != 0 {
+		t.Errorf("held messages must be deleted: %+v", held)
+	}
+}

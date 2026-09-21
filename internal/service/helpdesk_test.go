@@ -427,3 +427,160 @@ func TestSpamCommandDetection(t *testing.T) {
 		}
 	}
 }
+
+func (f *fakeTransport) SendCaptcha(ctx context.Context, user int64, text string) (int, error) {
+	return f.SendHTML(ctx, user, 0, "CAPTCHA:"+text, 0)
+}
+
+func (f *fakeTransport) SendQuarantineCard(ctx context.Context, chat int64, topic int, text string, _ int64) (int, error) {
+	return f.SendHTML(ctx, chat, topic, "QUARANTINE:"+text, 0)
+}
+
+func (fx *helpdeskFixture) newUserSays(t *testing.T, userID int64, msgID int, text string) {
+	t.Helper()
+	if err := fx.svc.OnUserMessage(context.Background(), UserMessage{UserID: userID, Name: "Новичок", Username: "newbie",
+		MessageID: msgID, Text: text, Date: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSpamReasons(t *testing.T) {
+	cases := map[string][]string{
+		"Не работает оплата":                     nil,
+		"Hello, I need help with my order":       nil,
+		"Привет, смотри https://spam.example":    {"ссылка"},
+		"Пишите в t.me/scam_channel":             {"ссылка"},
+		"Пишите @scam_manager сегодня":           {"@упоминание"},
+		"你好，我们提供最好的服务，欢迎联系我们":                    {"текст на языке: китайский"},
+		"مرحبا بكم في أفضل خدمة":                 {"текст на языке: арабский"},
+		"Привет 你好":                              nil, // a couple of foreign letters is not enough
+		"Как оплатить? Мой email me@example.com": nil,
+	}
+	for text, want := range cases {
+		got := spamReasons(UserMessage{Text: text})
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("spamReasons(%q) = %v, want %v", text, got, want)
+		}
+	}
+	if got := spamReasons(UserMessage{Text: "Привет", Forwarded: true}); len(got) != 1 || got[0] != "пересланное сообщение" {
+		t.Errorf("a forward must be flagged: %v", got)
+	}
+}
+
+func TestSuspiciousNewcomerIsQuarantinedUntilApproved(t *testing.T) {
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, nil)
+	fx.newUserSays(t, 77, 1, "Заработок без вложений https://scam.example")
+
+	if len(fx.tr.copies) != 0 {
+		t.Fatal("a suspicious message must not be relayed")
+	}
+	u, _ := fx.svc.User(ctx, 77)
+	if u.Hold != domain.HoldReview || u.Verified || u.TopicID != 0 {
+		t.Fatalf("user must be held for review without a topic: %+v", u)
+	}
+	cards := fx.tr.sentTo(testGroup)
+	if len(cards) != 1 || !strings.HasPrefix(cards[0].text, "QUARANTINE:") || !strings.Contains(cards[0].text, "ссылка") {
+		t.Fatalf("a quarantine card with the reason expected: %+v", cards)
+	}
+	if len(fx.tr.topics) != 1 || fx.tr.topics[0] != quarantineTopicName {
+		t.Fatalf("only the quarantine topic may exist: %v", fx.tr.topics)
+	}
+
+	fx.newUserSays(t, 77, 2, "Ответьте пожалуйста")
+	if held, _ := fx.svc.HeldMessages(ctx, 77); len(held) != 2 || len(fx.tr.copies) != 0 {
+		t.Fatalf("follow-ups of a held user must be held too: %+v", held)
+	}
+	if got := fx.tr.sentTo(testGroup); len(got) != 1 {
+		t.Errorf("the quarantine card must be posted once: %+v", got)
+	}
+
+	if err := fx.svc.Approve(ctx, 77); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = fx.svc.User(ctx, 77)
+	if !u.Verified || u.Hold != "" || u.TopicID == 0 || u.AwaitingSince == nil {
+		t.Fatalf("approved user gets a topic and is verified: %+v", u)
+	}
+	if len(fx.tr.copies) != 2 {
+		t.Errorf("both held messages must be relayed after approval: %+v", fx.tr.copies)
+	}
+	if held, _ := fx.svc.HeldMessages(ctx, 77); len(held) != 0 {
+		t.Errorf("held messages must be cleared: %+v", held)
+	}
+	fx.newUserSays(t, 77, 3, "Ещё ссылка https://ok.example")
+	if len(fx.tr.copies) != 3 {
+		t.Error("a verified user is no longer screened")
+	}
+}
+
+func TestBanDropsHeldMessages(t *testing.T) {
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, nil)
+	fx.newUserSays(t, 78, 1, "你好，我们提供最好的服务，欢迎联系我们")
+	if _, err := fx.svc.SetBanned(ctx, 78, true); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := fx.svc.User(ctx, 78)
+	if held, _ := fx.svc.HeldMessages(ctx, 78); len(held) != 0 || u.Hold != "" || !u.Banned {
+		t.Fatalf("ban must drop the held messages: held=%v user=%+v", held, u)
+	}
+	if err := fx.svc.Approve(ctx, 78); err == nil {
+		t.Error("a banned user cannot be approved")
+	}
+}
+
+func TestCaptchaHoldsFirstMessageUntilPassed(t *testing.T) {
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, map[string]string{"HELPDESK_SPAM_CAPTCHA": "true"})
+	if err := fx.svc.cfg.Update(ctx, func(h *domain.HelpdeskSettings) { h.SpamCaptcha = true }); err != nil {
+		t.Fatal(err)
+	}
+	fx.newUserSays(t, 79, 1, "Не работает оплата")
+
+	if got := fx.tr.sentTo(79); len(got) != 1 || !strings.HasPrefix(got[0].text, "CAPTCHA:") {
+		t.Fatalf("captcha prompt expected: %+v", got)
+	}
+	if len(fx.tr.copies) != 0 || len(fx.tr.topics) != 0 {
+		t.Fatal("nothing may reach the operators before the captcha")
+	}
+	if err := fx.svc.PassCaptcha(ctx, 78); err == nil {
+		t.Error("captcha of an unknown user must fail")
+	}
+	if err := fx.svc.PassCaptcha(ctx, 79); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := fx.svc.User(ctx, 79)
+	if !u.Verified || u.TopicID == 0 || len(fx.tr.copies) != 1 {
+		t.Fatalf("after the captcha the held message is relayed: user=%+v copies=%d", u, len(fx.tr.copies))
+	}
+	if err := fx.svc.PassCaptcha(ctx, 79); err == nil {
+		t.Error("a second captcha press must be a no-op error")
+	}
+}
+
+func TestOperatorReplyVerifiesUserAndLLMFlagOnlyForNewcomers(t *testing.T) {
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, nil)
+	fx.newUserSays(t, 80, 1, "Добрый день, вопрос по заказу")
+	if _, ok := fx.svc.SuspectSpam(ctx, 80, 0.5); ok {
+		t.Error("a low-confidence verdict must not warn")
+	}
+	if _, ok := fx.svc.SuspectSpam(ctx, 80, 0.95); !ok {
+		t.Error("an unverified user flagged with high confidence must warn")
+	}
+	if _, ok := fx.svc.SuspectSpam(ctx, 80, 0.95); ok {
+		t.Error("the warning must be sent once")
+	}
+
+	fx.newUserSays(t, 81, 1, "Добрый день")
+	if err := fx.svc.ReplyToUser(ctx, 81, "Здравствуйте!"); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := fx.svc.User(ctx, 81); !u.Verified {
+		t.Error("an answered user is verified")
+	}
+	if _, ok := fx.svc.SuspectSpam(ctx, 81, 0.99); ok {
+		t.Error("a verified user must never be flagged")
+	}
+}

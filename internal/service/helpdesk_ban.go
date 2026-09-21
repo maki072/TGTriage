@@ -39,6 +39,9 @@ func (s *HelpdeskService) SetBanned(ctx context.Context, userID int64, banned bo
 	}
 	u.Banned = banned
 	u.BannedAt = nil
+	if !banned {
+		u.Verified = true // an operator lifted the ban: no more screening for this user
+	}
 	who := ActorFrom(ctx).Name
 	if who == "" {
 		who = "веб-панель"
@@ -47,7 +50,7 @@ func (s *HelpdeskService) SetBanned(ctx context.Context, userID int64, banned bo
 	if banned {
 		now := time.Now()
 		u.BannedAt = &now
-		u.AwaitingSince, u.RemindedAt = nil, nil
+		u.AwaitingSince, u.RemindedAt, u.Hold = nil, nil, ""
 		text = "🚫 <b>Пользователь забанен как спам</b> · " + html.EscapeString(who) +
 			"\nЕго сообщения игнорируются. Разбанить можно в веб-панели: Диалоги → Спам."
 	}
@@ -70,6 +73,11 @@ func (s *HelpdeskService) SetBanned(ctx context.Context, userID int64, banned bo
 		return nil, err
 	}
 	s.log.Info("helpdesk user ban changed", "user_id", userID, "banned", banned, "by", who)
+	if banned {
+		if err := s.repo.DeleteHeld(ctx, s.botDBID, userID); err != nil {
+			s.log.Warn("drop banned user's held messages", "user_id", userID, "err", err)
+		}
+	}
 	if banned && s.tickets != nil {
 		if err := s.tickets.DismissHelpdeskTickets(ctx, s.botDBID, userID); err != nil {
 			s.log.Warn("dismiss banned user's tickets", "user_id", userID, "err", err)

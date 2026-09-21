@@ -24,6 +24,9 @@ type HelpdeskUser struct {
 	Blocked       bool       // the user blocked the bot
 	Banned        bool       // marked as spam: the bot silently ignores everything they write
 	BannedAt      *time.Time // when Banned was set
+	Verified      bool       // trusted: passed the check or was answered by an operator; screening skips them
+	Hold          string     // HoldCaptcha / HoldReview, "" = not held
+	SpamFlagged   bool       // the LLM already warned the operators about this user
 	AwaitingSince *time.Time // first user message not answered by an operator yet
 	RemindedAt    *time.Time // last reminder about AwaitingSince
 	LastMessageAt *time.Time
@@ -78,6 +81,8 @@ type HelpdeskUserFilter struct {
 
 // HelpdeskRepository stores support desk users, message mappings and ticket cards.
 type HelpdeskRepository interface {
+	HeldRepository
+
 	GetUser(ctx context.Context, botID, userID int64) (*HelpdeskUser, error)
 	UserByTopic(ctx context.Context, botID, groupID int64, topicID int) (*HelpdeskUser, error)
 	SaveUser(ctx context.Context, u *HelpdeskUser) error
@@ -96,4 +101,33 @@ type HelpdeskRepository interface {
 
 	SaveCard(ctx context.Context, c HelpdeskCard) error
 	Cards(ctx context.Context, taskID int64) ([]HelpdeskCard, error)
+}
+
+// Hold states of a not yet verified user: while set, their messages are kept aside instead of
+// being relayed to the operators.
+const (
+	HoldCaptcha = "captcha" // waiting for the user to press "I'm not a bot"
+	HoldReview  = "review"  // flagged as suspicious, waiting for an operator's decision
+)
+
+// HeldMessage is a message of a held user, kept until the user passes the check (then it is
+// relayed as usual) or is banned (then it is dropped).
+type HeldMessage struct {
+	ID           int64
+	BotID        int64
+	UserID       int64
+	MessageID    int
+	MediaGroupID string
+	ReplyToID    int
+	Text         string
+	SentAt       time.Time
+}
+
+// HeldRepository stores messages of held users.
+type HeldRepository interface {
+	AddHeld(ctx context.Context, m *HeldMessage) error
+	// HeldMessages returns the user's held messages, oldest first.
+	HeldMessages(ctx context.Context, botID, userID int64) ([]HeldMessage, error)
+	DeleteHeld(ctx context.Context, botID, userID int64) error
+	DeleteHeldOlderThan(ctx context.Context, before time.Time) (int64, error)
 }

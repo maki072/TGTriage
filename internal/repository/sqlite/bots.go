@@ -20,19 +20,19 @@ var _ domain.BotRepository = (*BotRepo)(nil)
 const botColumns = `id, token, username, label, active, sensitivity, ai_chain,
 	hd_enabled, hd_group_id, hd_triage_enabled, hd_about, hd_greeting_enabled, hd_greeting_text,
 	hd_autoreply_enabled, hd_autoreply_text, hd_hours_enabled, hd_hours_start, hd_hours_end, hd_hours_days,
-	hd_offhours_text, hd_reminder_minutes, created_at, updated_at`
+	hd_offhours_text, hd_reminder_minutes, hd_spam_screen, hd_spam_captcha, created_at, updated_at`
 
 func scanBot(sc interface{ Scan(...any) error }) (domain.Bot, error) {
 	var (
-		b                                                             domain.Bot
-		active, hdEnabled, hdTriage, hdGreeting, hdAutoreply, hdHours int
-		sensitivity, aiChain                                          string
-		cr, upd                                                       int64
+		b                                                                                      domain.Bot
+		active, hdEnabled, hdTriage, hdGreeting, hdAutoreply, hdHours, spamScreen, spamCaptcha int
+		sensitivity, aiChain                                                                   string
+		cr, upd                                                                                int64
 	)
 	err := sc.Scan(&b.ID, &b.Token, &b.Username, &b.Label, &active, &sensitivity, &aiChain,
 		&hdEnabled, &b.Helpdesk.GroupID, &hdTriage, &b.Helpdesk.About, &hdGreeting, &b.Helpdesk.GreetingText,
 		&hdAutoreply, &b.Helpdesk.AutoReplyText, &hdHours, &b.Helpdesk.HoursStart, &b.Helpdesk.HoursEnd, &b.Helpdesk.HoursDays,
-		&b.Helpdesk.OffHoursText, &b.Helpdesk.ReminderMinutes, &cr, &upd)
+		&b.Helpdesk.OffHoursText, &b.Helpdesk.ReminderMinutes, &spamScreen, &spamCaptcha, &cr, &upd)
 	if err != nil {
 		return b, err
 	}
@@ -46,6 +46,8 @@ func scanBot(sc interface{ Scan(...any) error }) (domain.Bot, error) {
 	b.Helpdesk.GreetingEnabled = hdGreeting == 1
 	b.Helpdesk.AutoReplyEnabled = hdAutoreply == 1
 	b.Helpdesk.HoursEnabled = hdHours == 1
+	b.Helpdesk.SpamScreen = spamScreen == 1
+	b.Helpdesk.SpamCaptcha = spamCaptcha == 1
 	b.CreatedAt = fromUnix(cr)
 	b.UpdatedAt = fromUnix(upd)
 	return b, nil
@@ -87,12 +89,13 @@ func (r *BotRepo) Save(ctx context.Context, b *domain.Bot) error {
 	b.UpdatedAt = now
 	chain, _ := json.Marshal(b.AIChain)
 	if b.ID == 0 {
-		res, err := r.db.ExecContext(ctx, `INSERT INTO bots (`+botColumns+`) VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		res, err := r.db.ExecContext(ctx, `INSERT INTO bots (`+botColumns+`) VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			b.Token, b.Username, b.Label, boolInt(b.Active), string(b.Sensitivity), string(chain),
 			boolInt(b.Helpdesk.Enabled), b.Helpdesk.GroupID, boolInt(b.Helpdesk.TriageEnabled), b.Helpdesk.About,
 			boolInt(b.Helpdesk.GreetingEnabled), b.Helpdesk.GreetingText, boolInt(b.Helpdesk.AutoReplyEnabled),
 			b.Helpdesk.AutoReplyText, boolInt(b.Helpdesk.HoursEnabled), b.Helpdesk.HoursStart, b.Helpdesk.HoursEnd,
-			b.Helpdesk.HoursDays, b.Helpdesk.OffHoursText, b.Helpdesk.ReminderMinutes, toUnix(b.CreatedAt), toUnix(b.UpdatedAt))
+			b.Helpdesk.HoursDays, b.Helpdesk.OffHoursText, b.Helpdesk.ReminderMinutes, boolInt(b.Helpdesk.SpamScreen), boolInt(b.Helpdesk.SpamCaptcha),
+			toUnix(b.CreatedAt), toUnix(b.UpdatedAt))
 		if err != nil {
 			if isUniqueViolation(err) {
 				return fmt.Errorf("%w: этот токен уже добавлен", domain.ErrInvalidInput)
@@ -109,12 +112,13 @@ func (r *BotRepo) Save(ctx context.Context, b *domain.Bot) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE bots SET token=?, username=?, label=?, active=?, sensitivity=?, ai_chain=?,
 		hd_enabled=?, hd_group_id=?, hd_triage_enabled=?, hd_about=?, hd_greeting_enabled=?, hd_greeting_text=?,
 		hd_autoreply_enabled=?, hd_autoreply_text=?, hd_hours_enabled=?, hd_hours_start=?, hd_hours_end=?, hd_hours_days=?,
-		hd_offhours_text=?, hd_reminder_minutes=?, updated_at=? WHERE id=?`,
+		hd_offhours_text=?, hd_reminder_minutes=?, hd_spam_screen=?, hd_spam_captcha=?, updated_at=? WHERE id=?`,
 		b.Token, b.Username, b.Label, boolInt(b.Active), string(b.Sensitivity), string(chain),
 		boolInt(b.Helpdesk.Enabled), b.Helpdesk.GroupID, boolInt(b.Helpdesk.TriageEnabled), b.Helpdesk.About,
 		boolInt(b.Helpdesk.GreetingEnabled), b.Helpdesk.GreetingText, boolInt(b.Helpdesk.AutoReplyEnabled),
 		b.Helpdesk.AutoReplyText, boolInt(b.Helpdesk.HoursEnabled), b.Helpdesk.HoursStart, b.Helpdesk.HoursEnd,
-		b.Helpdesk.HoursDays, b.Helpdesk.OffHoursText, b.Helpdesk.ReminderMinutes, toUnix(b.UpdatedAt), b.ID)
+		b.Helpdesk.HoursDays, b.Helpdesk.OffHoursText, b.Helpdesk.ReminderMinutes, boolInt(b.Helpdesk.SpamScreen), boolInt(b.Helpdesk.SpamCaptcha),
+		toUnix(b.UpdatedAt), b.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: этот токен уже добавлен", domain.ErrInvalidInput)

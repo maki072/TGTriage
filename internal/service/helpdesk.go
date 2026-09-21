@@ -29,6 +29,10 @@ type HelpdeskTransport interface {
 	SendHTML(ctx context.Context, chatID int64, topicID int, text string, replyTo int) (int, error)
 	// SendUserHeader posts the user card that opens a topic, with a button that bans the user as spam.
 	SendUserHeader(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error)
+	// SendCaptcha sends the "I am not a bot" prompt with its button to the user.
+	SendCaptcha(ctx context.Context, userID int64, text string) (int, error)
+	// SendQuarantineCard posts a held user's card with "approve" and "spam" buttons.
+	SendQuarantineCard(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error)
 	EditText(ctx context.Context, chatID int64, messageID int, text string, entities json.RawMessage, caption bool) error
 	DeleteMessage(ctx context.Context, chatID int64, messageID int) error
 	IsChatMember(ctx context.Context, chatID, userID int64) (bool, error)
@@ -57,6 +61,7 @@ type UserMessage struct {
 	Text         string // textual content for history and triage (media described in brackets)
 	Start        bool   // /start command
 	StartParam   string
+	Forwarded    bool // the message is a forward of someone else's
 	Date         time.Time
 }
 
@@ -104,12 +109,13 @@ type HelpdeskService struct {
 	botDBID   int64 // 0 for the main bot, otherwise the row id in the bots table
 	log       *slog.Logger
 
-	mu        sync.Mutex
-	locks     map[int64]*sync.Mutex
-	albums    map[string]*pendingAlbum
-	members   map[int64]memberEntry
-	forwards  map[int64]*pendingForward // by operator
-	ticketsMu sync.Mutex
+	mu           sync.Mutex
+	locks        map[int64]*sync.Mutex
+	albums       map[string]*pendingAlbum
+	members      map[int64]memberEntry
+	forwards     map[int64]*pendingForward // by operator
+	ticketsMu    sync.Mutex
+	quarantineMu sync.Mutex
 
 	wg      sync.WaitGroup
 	baseCtx context.Context
@@ -263,6 +269,17 @@ func (s *HelpdeskService) OnUserMessage(ctx context.Context, in UserMessage) err
 		return s.repo.SaveUser(ctx, u)
 	}
 
+	if !u.Verified {
+		if held, err := s.screen(ctx, u, in, st); held || err != nil {
+			return err
+		}
+	}
+	return s.deliver(ctx, u, st, in, renamed)
+}
+
+// deliver relays a user's message into their topic (creating or reopening it), stores it for history
+// and triage and sends the auto-reply. The caller holds the user's lock.
+func (s *HelpdeskService) deliver(ctx context.Context, u *domain.HelpdeskUser, st domain.HelpdeskSettings, in UserMessage, renamed bool) error {
 	now := time.Now()
 	u.LastMessageAt = &now
 	firstInCycle := u.AwaitingSince == nil
@@ -573,7 +590,7 @@ func (s *HelpdeskService) relayFromOperator(ctx context.Context, u *domain.Helpd
 		}
 		s.storeOutgoing(ctx, u.UserID, copies[i], m.OperatorID, m.Text)
 	}
-	u.AwaitingSince, u.RemindedAt, u.Blocked = nil, nil, false
+	u.AwaitingSince, u.RemindedAt, u.Blocked, u.Verified = nil, nil, false, true
 	return s.repo.SaveUser(ctx, u)
 }
 
@@ -887,7 +904,7 @@ func (s *HelpdeskService) ReplyToUser(ctx context.Context, userID int64, text st
 		}
 	}
 	s.storeOutgoing(ctx, userID, msgID, actor.ID, text)
-	u.AwaitingSince, u.RemindedAt, u.Blocked = nil, nil, false
+	u.AwaitingSince, u.RemindedAt, u.Blocked, u.Verified = nil, nil, false, true
 	return s.repo.SaveUser(ctx, u)
 }
 
@@ -993,26 +1010,7 @@ func ticketsTopicMetaKey(groupID int64) string { return fmt.Sprintf("hd_tickets_
 
 // TicketsTopic returns the group topic with all ticket cards, creating it when missing.
 func (s *HelpdeskService) TicketsTopic(ctx context.Context) (int64, int, error) {
-	group := s.GroupID()
-	if group == 0 {
-		return 0, 0, domain.ErrHelpdeskOff
-	}
-	s.ticketsMu.Lock()
-	defer s.ticketsMu.Unlock()
-	key := ticketsTopicMetaKey(group)
-	if v, err := s.settings.Meta(ctx, key); err == nil {
-		if id, _ := strconv.Atoi(v); id > 0 {
-			return group, id, nil
-		}
-	}
-	id, err := s.transport.CreateTopic(ctx, group, ticketsTopicName)
-	if err != nil {
-		return 0, 0, err
-	}
-	if err := s.settings.SetMeta(ctx, key, strconv.Itoa(id)); err != nil {
-		return 0, 0, err
-	}
-	return group, id, nil
+	return s.namedTopic(ctx, &s.ticketsMu, ticketsTopicMetaKey(s.GroupID()), ticketsTopicName)
 }
 
 // ForgetTicketsTopic drops a tickets topic that turned out to be deleted.
@@ -1078,6 +1076,9 @@ func (s *HelpdeskService) remind(ctx context.Context, userID int64, h domain.Hel
 
 // CleanupMessages drops message mappings older than before.
 func (s *HelpdeskService) CleanupMessages(ctx context.Context, before time.Time) (int64, error) {
+	if _, err := s.repo.DeleteHeldOlderThan(ctx, before); err != nil {
+		s.log.Warn("clean up held messages", "err", err)
+	}
 	return s.repo.DeleteMessagesOlderThan(ctx, before)
 }
 

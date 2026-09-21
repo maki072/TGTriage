@@ -140,6 +140,11 @@ type HelpdeskSettings struct {
 	HoursDays        string // ISO weekday digits, "12345" = Mon..Fri
 	OffHoursText     string // {hours} is replaced with HoursLabel()
 	ReminderMinutes  int    // 0 = no reminders about unanswered users
+	// SpamScreen holds the messages of new users that look like spam (links, @mentions, forwards,
+	// Chinese/Arabic/... text) in a quarantine topic until an operator approves or bans them.
+	SpamScreen bool
+	// SpamCaptcha makes every new user press "I am not a bot" before their first message is relayed.
+	SpamCaptcha bool
 }
 
 // DefaultHelpdeskSettings mirrors the built-in defaults of the "helpdesk.*" setting fields
@@ -156,6 +161,7 @@ func DefaultHelpdeskSettings() HelpdeskSettings {
 		HoursDays:       "12345",
 		OffHoursText:    "Сейчас нерабочее время. Сообщение получено, ответим в рабочие часы: {hours}.",
 		ReminderMinutes: 15,
+		SpamScreen:      true,
 	}
 }
 

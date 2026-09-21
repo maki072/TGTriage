@@ -124,6 +124,7 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /api/helpdesk/users/{id}/topic", s.handleHDTopic)
 	api.HandleFunc("POST /api/helpdesk/users/{id}/ticket", s.handleHDTicket)
 	api.HandleFunc("POST /api/helpdesk/users/{id}/ban", s.handleHDBan)
+	api.HandleFunc("POST /api/helpdesk/users/{id}/approve", s.handleHDApprove)
 
 	api.Handle("GET /api/digest", s.ownerOnly(s.handleDigest))
 	api.Handle("GET /api/stats", s.ownerOnly(s.handleStats))
