@@ -22,16 +22,18 @@ func trunc(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-func priorityEmoji(p domain.Priority) string {
+// priorityBars renders the same four-step indicator as the Mini App's PriorityMark: the level is the number of filled
+// bars, so it reads without colour or emoji.
+func priorityBars(p domain.Priority) string {
 	switch p {
 	case domain.PriorityCritical:
-		return "🔴"
+		return "▰▰▰▰"
 	case domain.PriorityHigh:
-		return "🟠"
+		return "▰▰▰▱"
 	case domain.PriorityMedium:
-		return "🟡"
+		return "▰▰▱▱"
 	default:
-		return "🟢"
+		return "▰▱▱▱"
 	}
 }
 
@@ -51,15 +53,15 @@ func priorityName(p domain.Priority) string {
 func statusLabel(s domain.TaskStatus) string {
 	switch s {
 	case domain.StatusNew:
-		return "🆕 Новая"
+		return "Новая"
 	case domain.StatusInProgress:
-		return "👀 В работе"
+		return "В работе"
 	case domain.StatusSnoozed:
-		return "⏰ Отложена"
+		return "Отложена"
 	case domain.StatusDone:
-		return "✅ Завершена"
+		return "Завершена"
 	case domain.StatusFalsePositive:
-		return "🗑 Ошибка триажа"
+		return "Не задача"
 	default:
 		return string(s)
 	}
@@ -68,19 +70,19 @@ func statusLabel(s domain.TaskStatus) string {
 func categoryLabel(c domain.Category) string {
 	switch c {
 	case domain.CategoryBug:
-		return "🐞 Баг"
+		return "Баг"
 	case domain.CategoryHelp:
-		return "🆘 Помощь"
+		return "Помощь"
 	case domain.CategoryTask:
-		return "📌 Задача"
+		return "Задача"
 	case domain.CategoryQuestion:
-		return "❓ Вопрос"
+		return "Вопрос"
 	case domain.CategoryDeadline:
-		return "⏳ Дедлайн"
+		return "Дедлайн"
 	case domain.CategoryAgreement:
-		return "🤝 Договорённость"
+		return "Договорённость"
 	default:
-		return "📎 Другое"
+		return "Другое"
 	}
 }
 

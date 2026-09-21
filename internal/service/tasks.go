@@ -352,7 +352,7 @@ func (s *TaskService) SendDraft(ctx context.Context, id int64) (*domain.Task, er
 }
 
 // DoneMessage is the confirmation text offered when closing a task with a notice to the contact.
-const DoneMessage = "Готово!"
+const DoneMessage = "Готово"
 
 // sendToContact delivers text to the task's contact: a support desk user via the bot, a Business chat
 // on behalf of the owner. It mutates t in memory (ReplySentAt/ReplyText); the caller persists t.

@@ -13,7 +13,7 @@ import (
 	"tgtriage/internal/telegram"
 )
 
-const helpText = `🤖 <b>Персональный ассистент на Telegram Business</b>
+const helpText = `<b>Персональный ассистент на Telegram Business</b>
 
 Бот читает входящие личные сообщения вашего аккаунта, склеивает серии коротких сообщений, отсекает шум с помощью LLM и превращает запросы собеседников в задачи с черновиком ответа.
 
@@ -26,6 +26,9 @@ const helpText = `🤖 <b>Персональный ассистент на Teleg
 /stats — статистика качества триажа
 /settings — ключи AI, модели, дебаунс, чувствительность, дайджест
 /cancel — отменить ввод
+
+<b>Закрытие по вашему слову</b>
+Если вы сами напишете собеседнику короткое «готово», «сделал», «готово, отключился», открытая задача из этого чата закроется (если их несколько — бот спросит, какую). Включается в /settings → «Ещё настройки».
 
 <b>Пересылка</b>
 Перешлите боту сообщение (или сразу несколько) из любого чата — чужое или своё, — и оно станет задачей. Сообщение пользователя хелпдеска станет тикетом.
@@ -133,15 +136,15 @@ func (b *Bot) onCommand(ctx context.Context, text string) {
 		err = b.showStats(ctx, nil)
 	case "/cancel":
 		b.states.clear()
-		err = b.sendText(ctx, "❎ Ввод отменён", kb(row(cb("🏠 Меню", "m"))))
+		err = b.sendText(ctx, "Ввод отменён", kb(row(cb("Меню", "m"))))
 	case "/help":
-		err = b.sendText(ctx, helpText, kb(row(cb("🏠 Меню", "m"))))
+		err = b.sendText(ctx, helpText, kb(row(cb("Меню", "m"))))
 	default:
 		err = b.sendText(ctx, "Неизвестная команда. /help — справка", nil)
 	}
 	if err != nil {
 		b.log.Warn("command failed", "cmd", cmd, "err", err)
-		_ = b.sendText(ctx, "❌ "+esc(humanError(err)), nil)
+		_ = b.sendText(ctx, "Ошибка: "+esc(humanError(err)), nil)
 	}
 }
 
@@ -189,7 +192,7 @@ func (b *Bot) onInput(ctx context.Context, st dialogState, text string) {
 		if !errors.Is(err, domain.ErrInvalidInput) && !errors.Is(err, domain.ErrEmptyReply) {
 			b.states.clear()
 		}
-		if serr := b.sendText(ctx, "❌ "+esc(humanError(err)), kb(row(cb("❌ Отмена", "cx")))); serr != nil {
+		if serr := b.sendText(ctx, "Ошибка: "+esc(humanError(err)), kb(row(cb("Отмена", "cx")))); serr != nil {
 			b.log.Warn("send input error", "err", serr)
 		}
 	}
@@ -201,7 +204,7 @@ func (b *Bot) inputReply(ctx context.Context, st dialogState, text string) error
 		return err
 	}
 	b.states.clear()
-	return b.renderTask(ctx, nil, t, fmt.Sprintf("✅ <b>Ответ отправлен</b> собеседнику %s", esc(t.SenderName)), nil)
+	return b.renderTask(ctx, nil, t, fmt.Sprintf("<b>Ответ отправлен</b> собеседнику %s", esc(t.SenderName)), nil)
 }
 
 func (b *Bot) inputSnooze(ctx context.Context, st dialogState, text string) error {
@@ -214,5 +217,5 @@ func (b *Bot) inputSnooze(ctx context.Context, st dialogState, text string) erro
 		return err
 	}
 	b.states.clear()
-	return b.renderTask(ctx, nil, t, "⏰ <b>Отложено до "+b.fmtTime(until)+"</b>", nil)
+	return b.renderTask(ctx, nil, t, "<b>Отложено до "+b.fmtTime(until)+"</b>", nil)
 }

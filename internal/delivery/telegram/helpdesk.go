@@ -63,7 +63,7 @@ func (b *Bot) onUserPrivate(ctx context.Context, m *telegram.Message) {
 
 // ---------- operators (private chat) ----------
 
-const operatorHelp = `🎧 <b>Хелпдеск</b>
+const operatorHelp = `<b>Хелпдеск</b>
 
 Вы оператор: пользователи пишут боту, их сообщения появляются в отдельных темах группы. Всё, что вы пишете в теме, бот отправляет пользователю от своего имени.
 
@@ -76,7 +76,7 @@ const operatorHelp = `🎧 <b>Хелпдеск</b>
 func (b *Bot) onOperatorPrivate(ctx context.Context, m *telegram.Message) {
 	if m.ForwardOrigin != nil {
 		if !b.forwardToHelpdesk(ctx, m) {
-			_ = b.sendTo(ctx, m.Chat.ID, "🤷 Не нашёл пользователя хелпдеска, от которого это сообщение. "+
+			_ = b.sendTo(ctx, m.Chat.ID, "Не нашёл пользователя хелпдеска, от которого это сообщение. "+
 				"Ответьте в его теме командой /1 на нужное сообщение.", nil)
 		}
 		return
@@ -88,7 +88,7 @@ func (b *Bot) onOperatorPrivate(ctx context.Context, m *telegram.Message) {
 			return
 		}
 	}
-	_ = b.sendTo(ctx, m.Chat.ID, operatorHelp, b.webAppKeyboard("📱 Открыть веб-панель", ""))
+	_ = b.sendTo(ctx, m.Chat.ID, operatorHelp, b.webAppKeyboard("Открыть веб-панель", ""))
 }
 
 func (b *Bot) webAppKeyboard(label, query string) *telegram.InlineKeyboardMarkup {
@@ -102,11 +102,11 @@ func (b *Bot) webAppKeyboard(label, query string) *telegram.InlineKeyboardMarkup
 func (b *Bot) sendTicketLink(ctx context.Context, chatID, taskID int64) {
 	t, err := b.tasks.Get(ctx, taskID)
 	if err != nil || !t.IsHelpdesk() {
-		_ = b.sendTo(ctx, chatID, "❌ Тикет не найден", nil)
+		_ = b.sendTo(ctx, chatID, "Тикет не найден", nil)
 		return
 	}
-	text := fmt.Sprintf("🎫 <b>Тикет #%d</b> · %s\n%s", t.ID, esc(trunc(t.Title, 150)), statusLabel(t.Status))
-	_ = b.sendTo(ctx, chatID, text, b.webAppKeyboard("📱 Открыть тикет", fmt.Sprintf("?task=%d", t.ID)))
+	text := fmt.Sprintf("<b>Тикет #%d</b> · %s\n%s", t.ID, esc(trunc(t.Title, 150)), statusLabel(t.Status))
+	_ = b.sendTo(ctx, chatID, text, b.webAppKeyboard("Открыть тикет", fmt.Sprintf("?task=%d", t.ID)))
 }
 
 // forwardToHelpdesk turns a message forwarded by the owner or an operator into a ticket when it came
@@ -124,14 +124,14 @@ func (b *Bot) forwardToHelpdesk(ctx context.Context, m *telegram.Message) bool {
 	chatID := m.Chat.ID
 	b.helpdesk.QueueForwardTicket(chatID, u, *msg, func(ctx context.Context, t *domain.Task, err error) {
 		if err != nil {
-			_ = b.sendTo(ctx, chatID, "❌ Не удалось создать тикет: "+esc(humanError(err)), nil)
+			_ = b.sendTo(ctx, chatID, "Не удалось создать тикет: "+esc(humanError(err)), nil)
 			return
 		}
-		text := fmt.Sprintf("🎫 <b>Тикет #%d создан</b> · %s\n👤 %s", t.ID, esc(trunc(t.Title, 150)), esc(u.Name))
+		text := fmt.Sprintf("<b>Тикет #%d создан</b> · %s\n%s", t.ID, esc(trunc(t.Title, 150)), esc(u.Name))
 		if link := b.helpdesk.TopicURL(u); link != "" {
-			text += fmt.Sprintf("\n💬 <a href=\"%s\">Тема пользователя</a>", esc(link))
+			text += fmt.Sprintf("\n<a href=\"%s\">Тема пользователя</a>", esc(link))
 		}
-		_ = b.sendTo(ctx, chatID, text, b.webAppKeyboard("📱 Открыть тикет", fmt.Sprintf("?task=%d", t.ID)))
+		_ = b.sendTo(ctx, chatID, text, b.webAppKeyboard("Открыть тикет", fmt.Sprintf("?task=%d", t.ID)))
 	})
 	if err := b.api.SendChatAction(ctx, chatID, "typing"); err != nil {
 		b.log.Debug("sendChatAction failed", "err", err)
@@ -225,9 +225,9 @@ func (b *Bot) onMyChatMember(ctx context.Context, u *telegram.ChatMemberUpdated)
 		}
 	case u.Chat.ID == b.helpdesk.ConfiguredGroupID():
 		if !u.NewChatMember.InChat() {
-			_ = b.sendText(ctx, "⚠️ <b>Бота удалили из группы хелпдеска</b> — сообщения пользователей больше не доставляются операторам.", nil)
+			_ = b.sendText(ctx, "<b>Бота удалили из группы хелпдеска</b> — сообщения пользователей больше не доставляются операторам.", nil)
 		} else if u.NewChatMember.Status == "member" {
-			_ = b.sendText(ctx, "⚠️ Бот в группе хелпдеска не администратор — назначьте его админом с правом «Управление темами».", nil)
+			_ = b.sendText(ctx, "Бот в группе хелпдеска не администратор — назначьте его админом с правом «Управление темами».", nil)
 		}
 	case u.Chat.Type == "group" || u.Chat.Type == "supergroup":
 		if u.NewChatMember.InChat() && u.NewChatMember.Status != u.OldChatMember.Status {
@@ -245,12 +245,12 @@ func (b *Bot) offerHelpdeskGroup(ctx context.Context, chatID int64, by *telegram
 		chat = *ch
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "👥 <b>Бот в группе «%s»</b>\nID: <code>%d</code>", esc(chat.Title), chat.ID)
+	fmt.Fprintf(&sb, "<b>Бот в группе «%s»</b>\nID: <code>%d</code>", esc(chat.Title), chat.ID)
 	if by != nil && by.ID != 0 && !by.IsBot {
 		fmt.Fprintf(&sb, "\nДобавил: %s", esc(by.FullName()))
 	}
 	if chat.Type == "group" {
-		sb.WriteString("\n\n⚠️ Это обычная группа. Включите в ней «Темы» — Telegram превратит её в супергруппу с новым ID, и я пришлю его сюда.")
+		sb.WriteString("\n\nЭто обычная группа. Включите в ней «Темы» — Telegram превратит её в супергруппу с новым ID, и я пришлю его сюда.")
 		_ = b.sendText(ctx, sb.String(), nil)
 		return
 	}
@@ -258,12 +258,12 @@ func (b *Bot) offerHelpdeskGroup(ctx context.Context, chatID int64, by *telegram
 		return
 	}
 	if !chat.IsForum {
-		sb.WriteString("\n\n⚠️ В группе выключены «Темы» — включите их в настройках группы.")
+		sb.WriteString("\n\nВ группе выключены «Темы» — включите их в настройках группы.")
 	}
 	if m, err := b.api.GetChatMember(ctx, chat.ID, b.cfg.BotID); err == nil && m.Status != "administrator" {
-		sb.WriteString("\n⚠️ Бот не администратор — назначьте его админом с правами «Управление темами», «Закреплять» и «Удалять сообщения».")
+		sb.WriteString("\nБот не администратор — назначьте его админом с правами «Управление темами», «Закреплять» и «Удалять сообщения».")
 	}
-	markup := kb(row(cb("🎧 Использовать для хелпдеска", fmt.Sprintf("hg:%d", chat.ID))))
+	markup := kb(row(cb("Использовать для хелпдеска", fmt.Sprintf("hg:%d", chat.ID))))
 	if err := b.sendText(ctx, sb.String(), markup); err != nil {
 		b.log.Warn("offer helpdesk group", "chat_id", chat.ID, "err", err)
 	}
@@ -279,17 +279,17 @@ func (b *Bot) useHelpdeskGroup(ctx context.Context, ref *msgRef, groupID int64, 
 	}); err != nil {
 		return err
 	}
-	answer("🎧 Хелпдеск включён", false)
+	answer("Хелпдеск включён", false)
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "🎧 <b>Хелпдеск включён</b>\nГруппа: <code>%d</code>\n\n", groupID)
+	fmt.Fprintf(&sb, "<b>Хелпдеск включён</b>\nГруппа: <code>%d</code>\n\n", groupID)
 	check, err := b.helpdesk.CheckGroup(ctx)
 	if err != nil {
-		fmt.Fprintf(&sb, "❌ Не удалось проверить группу: %s", esc(humanError(err)))
+		fmt.Fprintf(&sb, "Не удалось проверить группу: %s", esc(humanError(err)))
 	} else {
 		line := func(ok bool, text string) {
-			mark := "✅"
+			mark := "✓"
 			if !ok {
-				mark = "❌"
+				mark = "✗"
 			}
 			fmt.Fprintf(&sb, "%s %s\n", mark, text)
 		}
@@ -302,10 +302,10 @@ func (b *Bot) useHelpdeskGroup(ctx context.Context, ref *msgRef, groupID int64, 
 		if check.IsForum && check.CanManageTopics {
 			sb.WriteString("\nГотово: напишите боту с другого аккаунта — появится тема.")
 		} else {
-			sb.WriteString("\nИсправьте отмеченное ❌ — без тем и права «Управление темами» хелпдеск не работает.")
+			sb.WriteString("\nИсправьте отмеченное ✗ — без тем и права «Управление темами» хелпдеск не работает.")
 		}
 	}
-	markup := b.webAppKeyboard("⚙️ Настройки хелпдеска", "")
+	markup := b.webAppKeyboard("Настройки хелпдеска", "")
 	return b.render(ctx, ref, sb.String(), markup)
 }
 
@@ -314,52 +314,51 @@ func (b *Bot) useHelpdeskGroup(ctx context.Context, ref *msgRef, groupID int64, 
 func (b *Bot) ticketCardText(t *domain.Task, u *domain.HelpdeskUser, withTopicLink bool) string {
 	now := time.Now()
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "🎫 %s <b>Тикет #%d · %s</b>\n", priorityEmoji(t.Priority), t.ID, esc(trunc(t.Title, 150)))
+	fmt.Fprintf(&sb, "<b>Тикет #%d</b> · %s %s\n<b>%s</b>\n", t.ID, priorityBars(t.Priority), priorityName(t.Priority), esc(trunc(t.Title, 150)))
 	status := statusLabel(t.Status)
 	if t.Status == domain.StatusSnoozed && t.SnoozeUntil != nil {
 		status += " до " + b.fmtShort(*t.SnoozeUntil)
 	}
-	fmt.Fprintf(&sb, "Статус: %s\n\n", status)
+	fmt.Fprintf(&sb, "%s · %s\n\n", status, categoryLabel(t.Category))
 	name := t.SenderName
 	if u != nil {
 		name = u.Name
 	}
-	fmt.Fprintf(&sb, "👤 %s", esc(trunc(name, 60)))
+	fmt.Fprintf(&sb, "Пользователь: %s", esc(trunc(name, 60)))
 	if t.SenderUsername != "" {
 		fmt.Fprintf(&sb, " (@%s)", esc(t.SenderUsername))
 	}
 	sb.WriteString("\n")
 	if u != nil {
 		if u.Source != "" {
-			fmt.Fprintf(&sb, "🔗 Источник: <code>%s</code>\n", esc(u.Source))
+			fmt.Fprintf(&sb, "Источник: <code>%s</code>\n", esc(u.Source))
 		}
 		if link := b.helpdesk.TopicURL(u); withTopicLink && link != "" {
-			fmt.Fprintf(&sb, "💬 <a href=\"%s\">Тема пользователя</a>\n", esc(link))
+			fmt.Fprintf(&sb, "<a href=\"%s\">Тема пользователя</a>\n", esc(link))
 		}
 		if u.Blocked {
-			sb.WriteString("🚫 Пользователь заблокировал бота\n")
+			sb.WriteString("Пользователь заблокировал бота\n")
 		}
 	}
-	fmt.Fprintf(&sb, "🏷 %s · ⚡ %s\n", categoryLabel(t.Category), priorityName(t.Priority))
 	if t.Deadline != nil {
 		d := b.fmtTime(*t.Deadline)
 		if t.IsOverdue(now) {
-			d += " ⚠️ <b>просрочено</b>"
+			d += " · <b>просрочено</b>"
 		}
-		fmt.Fprintf(&sb, "📅 Срок: %s\n", d)
+		fmt.Fprintf(&sb, "Срок: %s\n", d)
 	}
-	fmt.Fprintf(&sb, "🕒 Создан: %s\n", b.fmtTime(t.CreatedAt))
+	fmt.Fprintf(&sb, "Создан: %s\n", b.fmtTime(t.CreatedAt))
 	if t.Description != "" {
-		fmt.Fprintf(&sb, "\n📝 %s\n", esc(trunc(t.Description, 1000)))
+		fmt.Fprintf(&sb, "\n%s\n", esc(trunc(t.Description, 1000)))
 	}
 	if t.SourceText != "" {
 		fmt.Fprintf(&sb, "\n<blockquote expandable>%s</blockquote>\n", esc(trunc(t.SourceText, 1200)))
 	}
 	if t.DraftReply != "" && t.ReplySentAt == nil {
-		fmt.Fprintf(&sb, "\n✍️ <b>Черновик ответа:</b>\n<i>%s</i>\n", esc(trunc(t.DraftReply, 600)))
+		fmt.Fprintf(&sb, "\n<b>Черновик ответа:</b>\n<i>%s</i>\n", esc(trunc(t.DraftReply, 600)))
 	}
 	if t.ReplySentAt != nil {
-		fmt.Fprintf(&sb, "\n📤 Ответ отправлен %s\n", b.fmtShort(*t.ReplySentAt))
+		fmt.Fprintf(&sb, "\nОтвет отправлен %s\n", b.fmtShort(*t.ReplySentAt))
 	}
 	return sb.String()
 }
@@ -368,26 +367,25 @@ func (b *Bot) ticketKeyboard(t *domain.Task, u *domain.HelpdeskUser, withTopicLi
 	d := func(action string) string { return fmt.Sprintf("hc:%s:%d", action, t.ID) }
 	var rows [][]button
 	if t.Status.IsOpen() {
-		var r1 []button
 		if t.DraftReply != "" && t.ReplySentAt == nil && t.HasChat() {
-			r1 = append(r1, cb("🚀 Ответить черновиком", d("draft")))
+			rows = append(rows, row(cb("Отправить черновик", d("draft"))))
 		}
+		var r2 []button
 		if t.Status != domain.StatusInProgress {
-			r1 = append(r1, cb("👀 В работу", d("work")))
+			r2 = append(r2, cb("В работу", d("work")))
 		}
-		if len(r1) > 0 {
-			rows = append(rows, r1)
-		}
-		rows = append(rows, row(cb("✅ Закрыть", d("done")), cb("🗑 Ошибка", d("fp"))))
+		// "Не задача" is the rare, destructive action: it sits behind "Ещё".
+		r2 = append(r2, cb("Закрыть", d("done")), cb("Ещё", d("more")))
+		rows = append(rows, r2)
 	} else {
-		rows = append(rows, row(cb("♻️ Вернуть в работу", d("reopen"))))
+		rows = append(rows, row(cb("Вернуть в работу", d("reopen"))))
 	}
 	var links []button
 	if link := b.helpdesk.TopicURL(u); withTopicLink && link != "" && u != nil {
-		links = append(links, button{Text: "💬 Тема", URL: link})
+		links = append(links, button{Text: "Тема", URL: link})
 	}
 	if b.settings.Get().WebAppPublicURL != "" && b.cfg.BotUsername != "" {
-		links = append(links, button{Text: "📱 В панели", URL: fmt.Sprintf("https://t.me/%s?start=t%d", b.cfg.BotUsername, t.ID)})
+		links = append(links, button{Text: "В панели", URL: fmt.Sprintf("https://t.me/%s?start=t%d", b.cfg.BotUsername, t.ID)})
 	}
 	if len(links) > 0 {
 		rows = append(rows, links)
@@ -486,7 +484,7 @@ func (b *Bot) topicNotice(ctx context.Context, t *domain.Task, text string) {
 }
 
 // groupCallback handles ticket card buttons pressed by operators in the helpdesk group.
-func (b *Bot) groupCallback(ctx context.Context, p []string, answer func(string, bool)) error {
+func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer func(string, bool)) error {
 	if len(p) < 3 || p[0] != "hc" {
 		return nil
 	}
@@ -503,21 +501,34 @@ func (b *Bot) groupCallback(ctx context.Context, p []string, answer func(string,
 	}
 	var notice string
 	switch p[1] {
+	case "more":
+		// the rare actions replace the card's keyboard until "Назад"
+		if ref == nil {
+			return nil
+		}
+		return b.api.EditMessageText(ctx, telegram.EditMessageTextParams{
+			ChatID: ref.ChatID, MessageID: ref.MessageID, Text: b.ticketCardText(t, b.ticketUser(ctx, t), true), ParseMode: "HTML",
+			ReplyMarkup:        kb(row(cb("Не задача", fmt.Sprintf("hc:fp:%d", t.ID))), row(cb("‹ Назад", fmt.Sprintf("hc:back:%d", t.ID)))),
+			LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true},
+		})
+	case "back":
+		b.publishTicket(ctx, t)
+		return nil
 	case "draft":
 		_, err = b.tasks.SendDraft(ctx, id)
-		notice = "🚀 Черновик отправлен пользователю"
+		notice = "Черновик отправлен пользователю"
 	case "work":
 		_, err = b.tasks.SetStatus(ctx, id, domain.StatusInProgress)
-		notice = "👀 Взято в работу"
+		notice = "Взято в работу"
 	case "done":
 		_, err = b.tasks.SetStatus(ctx, id, domain.StatusDone)
-		notice = "✅ Тикет закрыт"
+		notice = "Тикет закрыт"
 	case "fp":
 		_, err = b.tasks.SetStatus(ctx, id, domain.StatusFalsePositive)
-		notice = "🗑 Отмечено как ошибка"
+		notice = "Отмечено: не задача"
 	case "reopen":
 		_, err = b.tasks.SetStatus(ctx, id, domain.StatusNew)
-		notice = "♻️ Тикет возвращён"
+		notice = "Тикет возвращён"
 	default:
 		return domain.ErrInvalidInput
 	}

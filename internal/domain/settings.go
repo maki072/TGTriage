@@ -101,7 +101,9 @@ type Settings struct {
 	Sensitivity            Sensitivity
 	TriagePaused           bool
 	MarkReadOnWork         bool
-	// NotifyDoneOnClose: when closing a task with "✅ Закрыть", offer to send a "Готово!" message
+	// AutoCloseOnDone: a short "готово" / "сделал" written by the owner in a Business chat closes the open task of that chat.
+	AutoCloseOnDone bool
+	// NotifyDoneOnClose: when closing a task with "✅ Закрыть", offer to send a "Готово" message
 	// to the contact. Opt-in; when on, the bot still asks for confirmation every time rather than
 	// sending it automatically.
 	NotifyDoneOnClose bool

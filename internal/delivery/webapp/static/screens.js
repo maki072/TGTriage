@@ -487,7 +487,7 @@ async function closeFlow(t) {
     try { notify = (await loadSettings()).fields.find(f => f.key === 'task.notify_done_on_close').value; } catch (e) { /* ask nothing */ }
   }
   if (!notify) return finish({ send_message: false }, false);
-  askSheet('Закрыть задачу #' + t.id, 'Отправить «Готово!»', 'Собеседник получит сообщение перед закрытием', null,
+  askSheet('Закрыть задачу #' + t.id, 'Отправить «Готово»', 'Собеседник получит сообщение перед закрытием', null,
     on => finish({ send_message: on }, on));
 }
 

@@ -177,5 +177,5 @@ func (b *Bot) sendText(ctx context.Context, text string, markup *telegram.Inline
 }
 
 func (b *Bot) renderError(ctx context.Context, ref *msgRef, err error) error {
-	return b.render(ctx, ref, "❌ "+esc(humanError(err)), kb(row(cb("🏠 Меню", "m"))))
+	return b.render(ctx, ref, "Ошибка: "+esc(humanError(err)), kb(row(cb("Меню", "m"))))
 }

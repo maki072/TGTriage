@@ -37,22 +37,22 @@ func (b *Bot) onBusinessConnection(ctx context.Context, bc *telegram.BusinessCon
 
 	var sb strings.Builder
 	if !c.Enabled {
-		sb.WriteString("🔌 <b>Бот отключён от Telegram Business</b>\nНовые сообщения больше не анализируются.")
+		sb.WriteString("<b>Бот отключён от Telegram Business</b>\nНовые сообщения больше не анализируются.")
 	} else {
-		sb.WriteString("🔗 <b>Бот подключён к Telegram Business</b>\n\n")
+		sb.WriteString("<b>Бот подключён к Telegram Business</b>\n\n")
 		if c.CanReply {
-			sb.WriteString("✅ Отправка ответов от вашего имени: разрешена\n")
+			sb.WriteString("Отправка ответов от вашего имени: разрешена\n")
 		} else {
-			sb.WriteString("⚠️ Отправка ответов запрещена — кнопки «Ответить» работать не будут.\nВключите право «Отвечать на сообщения» в настройках чат-бота.\n")
+			sb.WriteString("Отправка ответов запрещена — кнопки «Ответить» работать не будут.\nВключите право «Отвечать на сообщения» в настройках чат-бота.\n")
 		}
 		if c.CanReadMessages {
-			sb.WriteString("✅ Отметка сообщений прочитанными: разрешена\n")
+			sb.WriteString("Отметка сообщений прочитанными: разрешена\n")
 		} else {
-			sb.WriteString("ℹ️ Отметка прочитанными недоступна (право «Читать сообщения» выключено)\n")
+			sb.WriteString("Отметка прочитанными недоступна (право «Читать сообщения» выключено)\n")
 		}
 		sb.WriteString("\nВходящие личные сообщения теперь анализируются автоматически.")
 	}
-	if err := b.sendText(ctx, sb.String(), kb(row(cb("🏠 Меню", "m")))); err != nil {
+	if err := b.sendText(ctx, sb.String(), kb(row(cb("Меню", "m")))); err != nil {
 		b.log.Warn("notify about connection", "err", err)
 	}
 }
@@ -117,6 +117,10 @@ func (b *Bot) onBusinessMessage(ctx context.Context, m *telegram.Message) {
 	var err error
 	if outgoing {
 		err = b.triage.OnOutgoing(ctx, dm)
+		if err == nil && m.SenderBusinessBot == nil && m.From != nil && m.From.ID == conn.UserID {
+			// typed by the owner (not a reply sent by the bot on their behalf)
+			b.autoCloseOnDone(ctx, conn.ID, dm)
+		}
 	} else {
 		if m.From != nil && m.From.IsBot {
 			return

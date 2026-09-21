@@ -15,9 +15,9 @@ func (b *Bot) TaskCreated(ctx context.Context, t *domain.Task) {
 		b.publishTicket(ctx, t)
 		return
 	}
-	header := "🆕 <b>Новая задача</b>"
+	header := "<b>Новая задача</b>"
 	if !t.HasChat() {
-		header = "🆕 <b>Новая задача из пересланного</b>"
+		header = "<b>Новая задача из пересланного</b>"
 	}
 	if err := b.renderTask(ctx, nil, t, header, nil); err != nil {
 		b.log.Error("notify task created", "task_id", t.ID, "err", err)
@@ -28,10 +28,10 @@ func (b *Bot) TaskCreated(ctx context.Context, t *domain.Task) {
 func (b *Bot) TaskUpdated(ctx context.Context, t *domain.Task) {
 	if t.IsHelpdesk() {
 		b.publishTicket(ctx, t)
-		b.topicNotice(ctx, t, fmt.Sprintf("🔄 Тикет #%d дополнен новыми сообщениями", t.ID))
+		b.topicNotice(ctx, t, fmt.Sprintf("Тикет #%d дополнен новыми сообщениями", t.ID))
 		return
 	}
-	if err := b.renderTask(ctx, nil, t, "🔄 <b>Задача дополнена новыми сообщениями</b>", nil); err != nil {
+	if err := b.renderTask(ctx, nil, t, "<b>Задача дополнена новыми сообщениями</b>", nil); err != nil {
 		b.log.Error("notify task updated", "task_id", t.ID, "err", err)
 	}
 }
@@ -52,10 +52,10 @@ func (b *Bot) AnalysisFailed(ctx context.Context, rec *domain.AnalysisRecord, co
 			where = fmt.Sprintf(" (хелпдеск, доп. бот #%d)", id)
 		}
 	}
-	text := fmt.Sprintf("⚠️ <b>Не удалось проанализировать сообщения</b> от %s%s\n\n"+
-		"🤖 %s · <code>%s</code>\n<code>%s</code>\n\n💬 <blockquote expandable>%s</blockquote>",
+	text := fmt.Sprintf("<b>Не удалось проанализировать сообщения</b> от %s%s\n\n"+
+		"%s · <code>%s</code>\n<code>%s</code>\n\n<blockquote expandable>%s</blockquote>",
 		esc(contactName), where, providerTitle(rec.Provider), esc(rec.Model), esc(trunc(rec.Error, 400)), esc(trunc(rec.InputText, 1500)))
-	markup := kb(row(cb("🔁 Повторить анализ", fmt.Sprintf("ar:%d", rec.ID))), row(cb("⚙️ Настройки", "st")))
+	markup := kb(row(cb("Повторить анализ", fmt.Sprintf("ar:%d", rec.ID))), row(cb("Настройки", "st")))
 	if err := b.sendText(ctx, text, markup); err != nil {
 		b.log.Error("notify analysis failure", "err", err)
 	}
@@ -64,10 +64,10 @@ func (b *Bot) AnalysisFailed(ctx context.Context, rec *domain.AnalysisRecord, co
 // ForwardFailed implements service.Notifier. Forwards are not stored, so there is nothing to retry
 // from the bot — the owner forwards the messages again.
 func (b *Bot) ForwardFailed(ctx context.Context, rec *domain.AnalysisRecord) {
-	text := fmt.Sprintf("⚠️ <b>Не удалось создать задачу из пересланного</b>\n\n"+
-		"🤖 %s · <code>%s</code>\n<code>%s</code>\n\n💬 <blockquote expandable>%s</blockquote>\n\nПерешлите сообщения ещё раз.",
+	text := fmt.Sprintf("<b>Не удалось создать задачу из пересланного</b>\n\n"+
+		"%s · <code>%s</code>\n<code>%s</code>\n\n<blockquote expandable>%s</blockquote>\n\nПерешлите сообщения ещё раз.",
 		providerTitle(rec.Provider), esc(rec.Model), esc(trunc(rec.Error, 400)), esc(trunc(rec.InputText, 1500)))
-	if err := b.sendText(ctx, text, kb(row(cb("⚙️ Настройки", "st")))); err != nil {
+	if err := b.sendText(ctx, text, kb(row(cb("Настройки", "st")))); err != nil {
 		b.log.Error("notify forward failure", "err", err)
 	}
 }
@@ -75,10 +75,10 @@ func (b *Bot) ForwardFailed(ctx context.Context, rec *domain.AnalysisRecord) {
 // SnoozeFired implements service.SchedulerNotifier.
 func (b *Bot) SnoozeFired(ctx context.Context, t *domain.Task) {
 	if t.IsHelpdesk() {
-		b.topicNotice(ctx, t, fmt.Sprintf("⏰ <b>Напоминание по тикету #%d</b> · %s", t.ID, esc(trunc(t.Title, 100))))
+		b.topicNotice(ctx, t, fmt.Sprintf("<b>Напоминание по тикету #%d</b> · %s", t.ID, esc(trunc(t.Title, 100))))
 		return
 	}
-	if err := b.renderTask(ctx, nil, t, "⏰ <b>Напоминание об отложенной задаче</b>", nil); err != nil {
+	if err := b.renderTask(ctx, nil, t, "<b>Напоминание об отложенной задаче</b>", nil); err != nil {
 		b.log.Error("notify snooze", "task_id", t.ID, "err", err)
 	}
 }
@@ -86,17 +86,17 @@ func (b *Bot) SnoozeFired(ctx context.Context, t *domain.Task) {
 // TaskReminder implements service.SchedulerNotifier: a one-off custom reminder set from the Mini App.
 func (b *Bot) TaskReminder(ctx context.Context, t *domain.Task) {
 	if t.IsHelpdesk() {
-		b.topicNotice(ctx, t, fmt.Sprintf("🔔 <b>Напоминание по тикету #%d</b> · %s", t.ID, esc(trunc(t.Title, 100))))
+		b.topicNotice(ctx, t, fmt.Sprintf("<b>Напоминание по тикету #%d</b> · %s", t.ID, esc(trunc(t.Title, 100))))
 		return
 	}
-	if err := b.renderTask(ctx, nil, t, "🔔 <b>Напоминание о задаче</b>", nil); err != nil {
+	if err := b.renderTask(ctx, nil, t, "<b>Напоминание о задаче</b>", nil); err != nil {
 		b.log.Error("notify task reminder", "task_id", t.ID, "err", err)
 	}
 }
 
 // PersonalNudge implements service.SchedulerNotifier: a repeated reminder about an open personal task.
 func (b *Bot) PersonalNudge(ctx context.Context, t *domain.Task) {
-	if err := b.renderTask(ctx, nil, t, "🔁 <b>Задача всё ещё не закрыта</b>", nil); err != nil {
+	if err := b.renderTask(ctx, nil, t, "<b>Задача всё ещё не закрыта</b>", nil); err != nil {
 		b.log.Error("notify personal nudge", "task_id", t.ID, "err", err)
 	}
 }

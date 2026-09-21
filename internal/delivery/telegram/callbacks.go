@@ -40,14 +40,14 @@ func (b *Bot) onCallback(ctx context.Context, q *telegram.CallbackQuery) {
 	parts := strings.Split(q.Data, ":")
 	if q.Message != nil && q.Message.Chat.ID != 0 && q.Message.Chat.ID == b.helpdesk.GroupID() {
 		// ticket cards in the helpdesk group: every member of the group is an operator
-		if err := b.groupCallback(ctx, parts, answer); err != nil {
+		if err := b.groupCallback(ctx, groupRef(q), parts, answer); err != nil {
 			b.log.Warn("group callback failed", "data", q.Data, "err", err)
-			answer("❌ "+humanError(err), true)
+			answer("Ошибка: "+humanError(err), true)
 		}
 		return
 	}
 	if q.From.ID != b.cfg.OwnerID {
-		answer("⛔ Нет доступа", true)
+		answer("Нет доступа", true)
 		return
 	}
 	var ref *msgRef
@@ -56,7 +56,7 @@ func (b *Bot) onCallback(ctx context.Context, q *telegram.CallbackQuery) {
 	}
 	if err := b.routeCallback(ctx, ref, parts, answer); err != nil {
 		b.log.Warn("callback failed", "data", q.Data, "err", err)
-		answer("❌ "+humanError(err), true)
+		answer("Ошибка: "+humanError(err), true)
 	}
 }
 
@@ -92,6 +92,8 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 	case "st":
 		b.states.clear()
 		return b.showSettings(ctx, ref)
+	case "sa":
+		return b.showSettingsMore(ctx, ref)
 	case "sm":
 		return b.showModelMenu(ctx, ref, arg(1))
 	case "smp":
@@ -104,23 +106,23 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 		if err := b.setModel(ctx, provider, presets[idx]); err != nil {
 			return err
 		}
-		answer("🧠 Модель: "+presets[idx], false)
-		return b.showSettings(ctx, ref)
+		answer("Модель: "+presets[idx], false)
+		return b.showSettingsMore(ctx, ref)
 	case "smc":
 		provider := arg(1)
 		b.states.set(dialogState{Kind: stateModel, Provider: provider})
-		return b.render(ctx, ref, fmt.Sprintf("✍️ Отправьте идентификатор модели %s, например <code>%s</code>",
-			providerTitle(provider), esc(b.settings.Get().ModelFor(provider))), kb(row(cb("❌ Отмена", "st"))))
+		return b.render(ctx, ref, fmt.Sprintf("Отправьте идентификатор модели %s, например <code>%s</code>",
+			providerTitle(provider), esc(b.settings.Get().ModelFor(provider))), kb(row(cb("Отмена", "st"))))
 	case "sd":
 		if arg(1) == "c" {
 			b.states.set(dialogState{Kind: stateDebounce})
-			return b.render(ctx, ref, "✍️ Отправьте время дебаунса в секундах (1–600).", kb(row(cb("❌ Отмена", "st"))))
+			return b.render(ctx, ref, "Отправьте время дебаунса в секундах (1–600).", kb(row(cb("Отмена", "st"))))
 		}
 		sec := int(num(1))
 		if _, err := b.settings.Update(ctx, func(s *domain.Settings) { s.DebounceSeconds = sec }); err != nil {
 			return err
 		}
-		answer(fmt.Sprintf("⏱ Дебаунс: %d с", sec), false)
+		answer(fmt.Sprintf("Дебаунс: %d с", sec), false)
 		return b.showSettings(ctx, ref)
 	case "ss":
 		sens, ok := domain.ParseSensitivity(arg(1))
@@ -130,19 +132,19 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 		if _, err := b.settings.Update(ctx, func(s *domain.Settings) { s.Sensitivity = sens }); err != nil {
 			return err
 		}
-		answer("🎯 Чувствительность: "+sensitivityName(sens), false)
+		answer("Чувствительность: "+sensitivityName(sens), false)
 		return b.showSettings(ctx, ref)
 	case "sg":
 		if arg(1) == "c" {
 			b.states.set(dialogState{Kind: stateDigestTime})
-			return b.render(ctx, ref, "✍️ Отправьте время дайджеста в формате <code>ЧЧ:ММ</code>, например <code>08:30</code>.",
-				kb(row(cb("❌ Отмена", "st"))))
+			return b.render(ctx, ref, "Отправьте время дайджеста в формате <code>ЧЧ:ММ</code>, например <code>08:30</code>.",
+				kb(row(cb("Отмена", "st"))))
 		}
 		st, err := b.settings.Update(ctx, func(s *domain.Settings) { s.DigestEnabled = !s.DigestEnabled })
 		if err != nil {
 			return err
 		}
-		answer("🌅 Дайджест: "+yesNo(st.DigestEnabled), false)
+		answer("Дайджест: "+yesNo(st.DigestEnabled), false)
 		return b.showSettings(ctx, ref)
 	case "stp":
 		st, err := b.settings.Update(ctx, func(s *domain.Settings) { s.TriagePaused = !s.TriagePaused })
@@ -150,23 +152,28 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 			return err
 		}
 		if st.TriagePaused {
-			answer("⏸ Личный триаж приостановлен (хелпдеск работает)", false)
+			answer("Личный триаж приостановлен (хелпдеск работает)", false)
 		} else {
-			answer("▶️ Личный триаж возобновлён", false)
+			answer("Личный триаж возобновлён", false)
 		}
 		return b.showSettings(ctx, ref)
 	case "smr":
 		if _, err := b.settings.Update(ctx, func(s *domain.Settings) { s.MarkReadOnWork = !s.MarkReadOnWork }); err != nil {
 			return err
 		}
-		return b.showSettings(ctx, ref)
+		return b.showSettingsMore(ctx, ref)
 	case "sfd":
 		if _, err := b.settings.Update(ctx, func(s *domain.Settings) { s.NotifyDoneOnClose = !s.NotifyDoneOnClose }); err != nil {
 			return err
 		}
-		return b.showSettings(ctx, ref)
+		return b.showSettingsMore(ctx, ref)
+	case "sac":
+		if _, err := b.settings.Update(ctx, func(s *domain.Settings) { s.AutoCloseOnDone = !s.AutoCloseOnDone }); err != nil {
+			return err
+		}
+		return b.showSettingsMore(ctx, ref)
 	case "stest":
-		answer("🧪 Проверяю провайдера…", false)
+		answer("Проверяю провайдера…", false)
 		go b.probe(ctx)
 		return nil
 	case "sreset":
@@ -174,10 +181,10 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 			if err := b.settings.Reset(ctx); err != nil {
 				return err
 			}
-			answer("♻️ Настройки сброшены к значениям из окружения", false)
+			answer("Настройки сброшены к значениям из окружения", false)
 			return b.showSettings(ctx, ref)
 		}
-		return b.render(ctx, ref, "♻️ Сбросить все настройки к значениям из переменных окружения?",
+		return b.render(ctx, ref, "Сбросить все настройки к значениям из переменных окружения?",
 			kb(row(cb("Да, сбросить", "sreset:y"), cb("Отмена", "st"))))
 
 	case "dg":
@@ -189,14 +196,14 @@ func (b *Bot) routeCallback(ctx context.Context, ref *msgRef, p []string, answer
 		if err := b.triage.Retry(ctx, num(1)); err != nil {
 			return err
 		}
-		answer("🔁 Анализ поставлен в очередь", false)
-		return b.render(ctx, ref, "🔁 Повторный анализ запущен — результат придёт отдельным сообщением.", nil)
+		answer("Анализ поставлен в очередь", false)
+		return b.render(ctx, ref, "Повторный анализ запущен — результат придёт отдельным сообщением.", nil)
 	case "hg":
 		return b.useHelpdeskGroup(ctx, ref, num(1), answer)
 	case "cx":
 		b.states.clear()
 		answer("Отменено", false)
-		return b.render(ctx, ref, "❎ Ввод отменён", kb(row(cb("🏠 Меню", "m"))))
+		return b.render(ctx, ref, "Ввод отменён", kb(row(cb("Меню", "m"))))
 	}
 	return nil
 }
@@ -232,7 +239,7 @@ func (b *Bot) taskAction(ctx context.Context, ref *msgRef, action string, id int
 		if err != nil {
 			return err
 		}
-		answer("🚀 Черновик отправлен собеседнику", false)
+		answer("Черновик отправлен собеседнику", false)
 		return b.renderTask(ctx, ref, t, "", nil)
 	case "reply":
 		t, err := b.tasks.Get(ctx, id)
@@ -240,31 +247,37 @@ func (b *Bot) taskAction(ctx context.Context, ref *msgRef, action string, id int
 			return err
 		}
 		b.states.set(dialogState{Kind: stateReply, TaskID: id})
-		answer("✏️ Жду текст ответа", false)
-		return b.sendText(ctx, fmt.Sprintf("✏️ Напишите ответ для <b>%s</b> (задача #%d).\n"+
+		answer("Жду текст ответа", false)
+		return b.sendText(ctx, fmt.Sprintf("Напишите ответ для <b>%s</b> (задача #%d).\n"+
 			"Следующее ваше сообщение будет отправлено собеседнику от вашего имени.", esc(t.SenderName), t.ID),
-			kb(row(cb("❌ Отмена", "cx"))))
+			kb(row(cb("Отмена", "cx"))))
 	case "work":
-		return setStatus(domain.StatusInProgress, "👀 Взято в работу")
+		return setStatus(domain.StatusInProgress, "Взято в работу")
 	case "done":
 		t, err := b.tasks.Get(ctx, id)
 		if err != nil {
 			return err
 		}
 		if !b.settings.Get().NotifyDoneOnClose || !t.HasChat() {
-			return setStatus(domain.StatusDone, "✅ Задача закрыта")
+			return setStatus(domain.StatusDone, "Задача закрыта")
 		}
-		return b.renderTask(ctx, ref, t, "✅ <b>Закрыть задачу?</b>", closeConfirmKeyboard(id))
+		return b.renderTask(ctx, ref, t, "<b>Закрыть задачу?</b>", closeConfirmKeyboard(id))
 	case "fp":
-		return setStatus(domain.StatusFalsePositive, "🗑 Отмечено как ложное срабатывание")
+		return setStatus(domain.StatusFalsePositive, "Отмечено: не задача")
 	case "reopen":
-		return setStatus(domain.StatusNew, "♻️ Задача возвращена")
+		return setStatus(domain.StatusNew, "Задача возвращена")
+	case "more":
+		t, err := b.tasks.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		return b.renderTask(ctx, ref, t, "<b>Другие действия</b>", moreKeyboard(t))
 	case "snz":
 		t, err := b.tasks.Get(ctx, id)
 		if err != nil {
 			return err
 		}
-		return b.renderTask(ctx, ref, t, "⏰ <b>На сколько отложить?</b>", snoozeKeyboard(id))
+		return b.renderTask(ctx, ref, t, "<b>На сколько отложить?</b>", snoozeKeyboard(id))
 	}
 	return domain.ErrInvalidInput
 }
@@ -276,10 +289,10 @@ func (b *Bot) snoozeAction(ctx context.Context, ref *msgRef, id int64, opt strin
 	switch opt {
 	case "c":
 		b.states.set(dialogState{Kind: stateSnoozeCustom, TaskID: id})
-		answer("✍️ Жду срок", false)
-		return b.sendText(ctx, "⏰ Отправьте срок для задачи #"+strconv.FormatInt(id, 10)+".\n"+
+		answer("Жду срок", false)
+		return b.sendText(ctx, "Отправьте срок для задачи #"+strconv.FormatInt(id, 10)+".\n"+
 			"Примеры: <code>45m</code>, <code>2h</code>, <code>1d</code>, <code>18:00</code>, <code>завтра 10:00</code>, <code>20.09 12:00</code>",
-			kb(row(cb("❌ Отмена", "cx"))))
+			kb(row(cb("Отмена", "cx"))))
 	case "tm":
 		d := now.AddDate(0, 0, 1)
 		until = time.Date(d.Year(), d.Month(), d.Day(), 9, 0, 0, 0, loc)
@@ -294,7 +307,7 @@ func (b *Bot) snoozeAction(ctx context.Context, ref *msgRef, id int64, opt strin
 	if err != nil {
 		return err
 	}
-	answer("⏰ Отложено до "+b.fmtShort(until), false)
+	answer("Отложено до "+b.fmtShort(until), false)
 	return b.renderTask(ctx, ref, t, "", nil)
 }
 
@@ -306,14 +319,14 @@ func (b *Bot) closeAction(ctx context.Context, ref *msgRef, id int64, opt string
 		if err != nil {
 			return err
 		}
-		answer("✅ Закрыто, собеседнику отправлено «"+service.DoneMessage+"»", false)
+		answer("Закрыто, собеседнику отправлено «"+service.DoneMessage+"»", false)
 		return b.renderTask(ctx, ref, t, "", nil)
 	case "n":
 		t, err := b.tasks.SetStatus(ctx, id, domain.StatusDone)
 		if err != nil {
 			return err
 		}
-		answer("✅ Задача закрыта без сообщения", false)
+		answer("Задача закрыта без сообщения", false)
 		return b.renderTask(ctx, ref, t, "", nil)
 	}
 	return domain.ErrInvalidInput
@@ -324,20 +337,28 @@ func (b *Bot) probe(parent context.Context) {
 	defer cancel()
 	results, err := b.triage.Probe(ctx)
 	var sb strings.Builder
-	sb.WriteString("🧪 <b>Проверка ключей AI</b>\n\n")
+	sb.WriteString("<b>Проверка ключей AI</b>\n\n")
 	if err != nil {
-		fmt.Fprintf(&sb, "❌ Ошибка: <code>%s</code>", esc(humanError(err)))
+		fmt.Fprintf(&sb, "Ошибка: <code>%s</code>", esc(humanError(err)))
 	}
 	for _, r := range results {
 		fmt.Fprintf(&sb, "%d. <b>%s</b> · <code>%s</code> · <code>%s</code> · %.1f с\n",
 			r.Index, providerTitle(r.Provider), esc(r.KeyMask), esc(r.Model), r.Latency.Seconds())
 		if r.Err != nil {
-			fmt.Fprintf(&sb, "❌ <code>%s</code>\n\n", esc(trunc(humanError(r.Err), 300)))
+			fmt.Fprintf(&sb, "Ошибка: <code>%s</code>\n\n", esc(trunc(humanError(r.Err), 300)))
 			continue
 		}
-		fmt.Fprintf(&sb, "✅ работает · задача: %s · уверенность %.0f%%\n\n", yesNo(r.Analysis.IsTask), r.Analysis.Confidence*100)
+		fmt.Fprintf(&sb, "Работает · задача: %s · уверенность %.0f%%\n\n", yesNo(r.Analysis.IsTask), r.Analysis.Confidence*100)
 	}
-	if err := b.sendText(ctx, sb.String(), kb(row(cb("⚙️ Настройки", "st")))); err != nil {
+	if err := b.sendText(ctx, sb.String(), kb(row(cb("Настройки", "st")))); err != nil {
 		b.log.Warn("send probe result", "err", err)
 	}
+}
+
+// groupRef identifies the message a callback came from (nil for inaccessible messages).
+func groupRef(q *telegram.CallbackQuery) *msgRef {
+	if q.Message == nil || q.Message.Chat.ID == 0 {
+		return nil
+	}
+	return &msgRef{ChatID: q.Message.Chat.ID, MessageID: q.Message.MessageID}
 }

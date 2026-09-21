@@ -83,7 +83,7 @@ document.addEventListener('toggle', e => {
 function restartMark(f) { return f.restart ? ' ' + badge('после перезапуска') : ''; }
 function fieldHtml(s, f) {
   const k = esc(f.key);
-  const lbl = { labelHtml: esc(f.label) + restartMark(f), desc: f.desc };
+  const lbl = { labelHtml: esc(stripEmoji(f.label)) + restartMark(f), desc: f.desc };
   switch (f.kind) {
     case 'bool': return navRow(Object.assign({}, lbl, { trailing: switchBtn(f.value, `data-act="fld-bool" data-field="${k}"`, f.label) }));
     case 'int': return navRow(Object.assign({}, lbl, { trailing: `<input class="tr-input narrow" type="number" data-field="${k}" data-kind="int" value="${esc(f.value)}"${f.min ? ` min="${f.min}"` : ''}${f.max ? ` max="${f.max}"` : ''}>` }));
