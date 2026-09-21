@@ -104,6 +104,10 @@ func (f *fakeTransport) EditText(_ context.Context, chat int64, msg int, text st
 
 func (f *fakeTransport) DeleteMessage(context.Context, int64, int) error { return nil }
 
+func (f *fakeTransport) SendUserHeader(ctx context.Context, chat int64, topic int, text string, _ int64) (int, error) {
+	return f.SendHTML(ctx, chat, topic, text, 0)
+}
+
 func (f *fakeTransport) IsChatMember(_ context.Context, _ int64, user int64) (bool, error) {
 	return user == 500, nil
 }
@@ -353,6 +357,73 @@ func TestCommandsDetection(t *testing.T) {
 	for raw, want := range map[string]bool{"// note": true, "!note": true, "http://x": false, "Привет!": false} {
 		if IsInternalNote(raw) != want {
 			t.Errorf("note %q: want %v", raw, want)
+		}
+	}
+}
+
+type fakeDismisser struct{ calls []int64 }
+
+func (f *fakeDismisser) DismissHelpdeskTickets(_ context.Context, _, userID int64) error {
+	f.calls = append(f.calls, userID)
+	return nil
+}
+
+func TestBannedUserIsIgnoredUntilUnbanned(t *testing.T) {
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, nil)
+	dismisser := &fakeDismisser{}
+	fx.svc.SetTickets(dismisser)
+	fx.userSays(t, 10, "Купите подписчиков")
+	u, _ := fx.svc.User(ctx, 42)
+
+	// the operator bans the author with /spam in the topic
+	spam := OperatorMessage{GroupID: testGroup, TopicID: u.TopicID, MessageID: 300, OperatorID: 500, RawText: "/spam", Text: "/spam"}
+	if err := fx.svc.OnOperatorMessage(ctx, spam); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = fx.svc.User(ctx, 42)
+	if !u.Banned || u.BannedAt == nil || u.AwaitingSince != nil || !u.TopicClosed {
+		t.Fatalf("user must be banned, topic closed, no longer awaiting: %+v", u)
+	}
+	if len(dismisser.calls) != 1 || dismisser.calls[0] != 42 {
+		t.Errorf("open tickets of the banned user must be dismissed: %v", dismisser.calls)
+	}
+
+	copies, sent := len(fx.tr.copies), len(fx.tr.sent)
+	fx.userSays(t, 11, "Ещё раз купите подписчиков")
+	if len(fx.tr.copies) != copies || len(fx.tr.sent) != sent || len(fx.tr.topics) != 1 {
+		t.Fatal("a banned user's message must not be relayed, answered or get a new topic")
+	}
+	if msgs, _ := fx.svc.Conversation(ctx, 42, 10); len(msgs) != 1 {
+		t.Errorf("a banned user's message must not be stored: %+v", msgs)
+	}
+	if err := fx.svc.ReplyToUser(ctx, 42, "привет"); err == nil {
+		t.Error("replying to a banned user must fail")
+	}
+	if list, total, _ := fx.svc.Users(ctx, domain.HelpdeskUserFilter{}); total != 0 || len(list) != 0 {
+		t.Errorf("banned users must be left out of the regular list: %+v", list)
+	}
+	if list, total, _ := fx.svc.Users(ctx, domain.HelpdeskUserFilter{BannedOnly: true}); total != 1 || list[0].UserID != 42 {
+		t.Errorf("the spam list must contain the banned user: %+v", list)
+	}
+
+	if _, err := fx.svc.SetBanned(ctx, 42, false); err != nil {
+		t.Fatal(err)
+	}
+	fx.userSays(t, 12, "Извините, я по делу")
+	u, _ = fx.svc.User(ctx, 42)
+	if u.Banned || u.BannedAt != nil || u.AwaitingSince == nil || u.TopicClosed {
+		t.Fatalf("after unban the user writes again and the topic is reopened: %+v", u)
+	}
+	if len(fx.tr.reopened) != 1 || len(fx.tr.copies) != copies+1 {
+		t.Errorf("message after unban must be relayed into the reopened topic: reopened=%v copies=%d", fx.tr.reopened, len(fx.tr.copies))
+	}
+}
+
+func TestSpamCommandDetection(t *testing.T) {
+	for raw, want := range map[string]bool{"/spam": true, " /spam ": true, "/spam@bot": true, "/spam причина": true, "/spammer": false, "спам": false} {
+		if got := IsSpamCommand(raw); got != want {
+			t.Errorf("IsSpamCommand(%q) = %v, want %v", raw, got, want)
 		}
 	}
 }

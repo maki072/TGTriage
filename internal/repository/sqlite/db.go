@@ -276,6 +276,12 @@ var migrations = [][]string{
 		`CREATE INDEX idx_hd_messages_user ON hd_messages (bot_id, user_id, user_msg_id)`,
 		`CREATE INDEX idx_hd_messages_group ON hd_messages (bot_id, group_id, group_msg_id)`,
 	},
+	// v5: spam bans — a banned user's messages are dropped by the bot
+	{
+		`ALTER TABLE hd_users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE hd_users ADD COLUMN banned_at INTEGER NOT NULL DEFAULT 0`,
+		`CREATE INDEX idx_hd_users_banned ON hd_users (bot_id, banned)`,
+	},
 }
 
 // Backup writes a consistent, compacted copy of the database to path (which must not exist).

@@ -412,3 +412,13 @@ func (c *Client) Poll(ctx context.Context, handler func(context.Context, Update)
 		}
 	}
 }
+
+// EditMessageReplyMarkup replaces (or, with nil markup, removes) the inline keyboard of a message.
+func (c *Client) EditMessageReplyMarkup(ctx context.Context, chatID int64, messageID int, markup *InlineKeyboardMarkup) error {
+	if markup == nil {
+		markup = &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{}}
+	}
+	return c.call(ctx, c.http, "editMessageReplyMarkup", map[string]any{
+		"chat_id": chatID, "message_id": messageID, "reply_markup": markup,
+	}, nil)
+}

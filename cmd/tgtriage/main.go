@@ -171,6 +171,7 @@ func run(cfg *config.Config, log *slog.Logger) error {
 	triage := service.NewTriageService(store.Messages, store.Tasks, store.Analyses, conns, settings, botsSvc, registry, bot, log)
 	bot.SetTriage(triage)
 	helpdesk.SetTriage(triage)
+	helpdesk.SetTickets(tasks)
 	backups := service.NewBackupService(store, filepath.Join(filepath.Dir(cfg.DBPath), "backups"), settings, gateway, log)
 	scheduler := service.NewScheduler(tasks, settings, store.Messages, bot, helpdesk, backups, log)
 	hdRegistry := service.NewBotRegistry(helpdesk)

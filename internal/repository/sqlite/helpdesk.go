@@ -16,22 +16,24 @@ type HelpdeskRepo struct{ db *sql.DB }
 
 var _ domain.HelpdeskRepository = (*HelpdeskRepo)(nil)
 
-const hdUserColumns = `bot_id, user_id, name, username, language_code, source, group_id, topic_id, topic_closed, blocked,
+const hdUserColumns = `bot_id, user_id, name, username, language_code, source, group_id, topic_id, topic_closed, blocked, banned, banned_at,
 	awaiting_since, reminded_at, last_message_at, created_at, updated_at`
 
 func scanHDUser(sc interface{ Scan(...any) error }) (domain.HelpdeskUser, error) {
 	var (
-		u                                 domain.HelpdeskUser
-		closed, blocked                   int
-		awaiting, reminded, last, cr, upd int64
+		u                                           domain.HelpdeskUser
+		closed, blocked, banned                     int
+		bannedAt, awaiting, reminded, last, cr, upd int64
 	)
-	err := sc.Scan(&u.BotID, &u.UserID, &u.Name, &u.Username, &u.LanguageCode, &u.Source, &u.GroupID, &u.TopicID, &closed, &blocked,
+	err := sc.Scan(&u.BotID, &u.UserID, &u.Name, &u.Username, &u.LanguageCode, &u.Source, &u.GroupID, &u.TopicID, &closed, &blocked, &banned, &bannedAt,
 		&awaiting, &reminded, &last, &cr, &upd)
 	if err != nil {
 		return u, err
 	}
 	u.TopicClosed = closed == 1
 	u.Blocked = blocked == 1
+	u.Banned = banned == 1
+	u.BannedAt = ptrFromUnix(bannedAt)
 	u.AwaitingSince = ptrFromUnix(awaiting)
 	u.RemindedAt = ptrFromUnix(reminded)
 	u.LastMessageAt = ptrFromUnix(last)
@@ -66,13 +68,14 @@ func (r *HelpdeskRepo) SaveUser(ctx context.Context, u *domain.HelpdeskUser) err
 		u.CreatedAt = now
 	}
 	u.UpdatedAt = now
-	_, err := r.db.ExecContext(ctx, `INSERT INTO hd_users (`+hdUserColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO hd_users (`+hdUserColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (bot_id, user_id) DO UPDATE SET
 			name = excluded.name, username = excluded.username, language_code = excluded.language_code,
 			source = excluded.source, group_id = excluded.group_id, topic_id = excluded.topic_id,
-			topic_closed = excluded.topic_closed, blocked = excluded.blocked, awaiting_since = excluded.awaiting_since,
+			topic_closed = excluded.topic_closed, blocked = excluded.blocked, banned = excluded.banned,
+			banned_at = excluded.banned_at, awaiting_since = excluded.awaiting_since,
 			reminded_at = excluded.reminded_at, last_message_at = excluded.last_message_at, updated_at = excluded.updated_at`,
-		u.BotID, u.UserID, u.Name, u.Username, u.LanguageCode, u.Source, u.GroupID, u.TopicID, boolInt(u.TopicClosed), boolInt(u.Blocked),
+		u.BotID, u.UserID, u.Name, u.Username, u.LanguageCode, u.Source, u.GroupID, u.TopicID, boolInt(u.TopicClosed), boolInt(u.Blocked), boolInt(u.Banned), ptrToUnix(u.BannedAt),
 		ptrToUnix(u.AwaitingSince), ptrToUnix(u.RemindedAt), ptrToUnix(u.LastMessageAt), toUnix(u.CreatedAt), toUnix(u.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("save helpdesk user: %w", err)
@@ -88,6 +91,11 @@ func (r *HelpdeskRepo) ListUsers(ctx context.Context, botID *int64, f domain.Hel
 	if botID != nil {
 		where = append(where, "bot_id = ?")
 		args = append(args, *botID)
+	}
+	if f.BannedOnly {
+		where = append(where, "banned = 1")
+	} else {
+		where = append(where, "banned = 0")
 	}
 	if f.AwaitingOnly {
 		where = append(where, "awaiting_since > 0")
@@ -109,9 +117,12 @@ func (r *HelpdeskRepo) ListUsers(ctx context.Context, botID *int64, f domain.Hel
 	if limit <= 0 {
 		limit = 50
 	}
+	order := "CASE WHEN awaiting_since = 0 THEN 1 ELSE 0 END, awaiting_since ASC, last_message_at DESC"
+	if f.BannedOnly {
+		order = "banned_at DESC"
+	}
 	rows, err := r.db.QueryContext(ctx, `SELECT `+hdUserColumns+` FROM hd_users`+cond+`
-		ORDER BY CASE WHEN awaiting_since = 0 THEN 1 ELSE 0 END, awaiting_since ASC, last_message_at DESC
-		LIMIT ? OFFSET ?`, append(args, limit, f.Offset)...)
+		ORDER BY `+order+` LIMIT ? OFFSET ?`, append(args, limit, f.Offset)...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list helpdesk users: %w", err)
 	}
@@ -130,7 +141,7 @@ func (r *HelpdeskRepo) ListUsers(ctx context.Context, botID *int64, f domain.Hel
 func (r *HelpdeskRepo) DueReminders(ctx context.Context, botID int64, cutoff time.Time) ([]domain.HelpdeskUser, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT `+hdUserColumns+` FROM hd_users
 		WHERE bot_id = ? AND awaiting_since > 0 AND awaiting_since <= ? AND reminded_at <= ? AND topic_id > 0
-			AND topic_closed = 0 AND blocked = 0
+			AND topic_closed = 0 AND blocked = 0 AND banned = 0
 		ORDER BY awaiting_since`, botID, cutoff.Unix(), cutoff.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("due reminders: %w", err)

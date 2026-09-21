@@ -541,3 +541,21 @@ func (s *TaskService) Stats(ctx context.Context, scope domain.TaskScope, connID 
 	}
 	return &Stats{Days: days, Tasks: counts, Analyses: as}, nil
 }
+
+// DismissHelpdeskTickets closes the open tickets of a support desk user as "not a task" — used when
+// the user is banned as spam. The bot's ticket cards follow through the usual task observer.
+func (s *TaskService) DismissHelpdeskTickets(ctx context.Context, botID, userID int64) error {
+	open, _, err := s.tasks.List(ctx, domain.TaskFilter{
+		ConnectionID: domain.HelpdeskConnectionFor(botID), ChatID: userID,
+		Statuses: []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed}, Limit: 200,
+	})
+	if err != nil {
+		return err
+	}
+	for _, t := range open {
+		if _, err := s.SetStatus(ctx, t.ID, domain.StatusFalsePositive); err != nil {
+			return err
+		}
+	}
+	return nil
+}

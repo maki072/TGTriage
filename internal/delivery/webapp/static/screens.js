@@ -618,6 +618,7 @@ async function openMergePicker(t) {
 function userBadges(u) {
   const b = [];
   if (u.awaiting_since) b.push(badge('ждёт ' + esc(waitedFor(u.awaiting_since)), { tone: 'warning', icon: 'clock' }));
+  if (u.banned) b.push(badge('спам' + (u.banned_at ? ' · ' + esc(fmtDT(u.banned_at)) : ''), { tone: 'danger', icon: 'ban' }));
   if (u.blocked) b.push(badge('заблокировал бота', { tone: 'danger', icon: 'ban' }));
   if (u.topic_closed) b.push(badge('тема закрыта', { icon: 'lock' }));
   if (u.source) b.push(badge(esc(u.source), { icon: 'external' }));
@@ -636,7 +637,7 @@ async function renderDialogs(tok) {
   const showBot = isOwner() && state.bots.length > 0;
   app.innerHTML = `<div class="tr-filterbar"><div class="tr-filterbar__top"><div class="tr-search">${I('search', 20)}<input class="tr-input" id="dlSearch" type="search" placeholder="Имя, @username или ID" aria-label="Поиск" value="${esc(f.q)}"></div>` +
     (showBot ? `<button type="button" class="tr-filterbtn" data-act="dl-filters" data-active="${f.bot !== 'all'}" aria-label="Фильтры">${I('filter', 20)}${f.bot !== 'all' ? '<span class="tr-filterbtn__n">1</span>' : ''}</button>` : '') + `</div>` +
-    segmented('dfilter', [{ value: 'awaiting', label: 'Ждут ответа', count: state.awaiting || undefined }, { value: 'all', label: 'Все' }], f.filter) + `</div><div id="dlBody">${skeleton(4)}</div>`;
+    segmented('dfilter', [{ value: 'awaiting', label: 'Ждут ответа', count: state.awaiting || undefined }, { value: 'all', label: 'Все' }, { value: 'banned', label: 'Спам' }], f.filter) + `</div><div id="dlBody">${skeleton(4)}</div>`;
   await loadDialogItems(tok || state.rt);
 }
 SEG.dfilter = v => { state.dialogsFilter.filter = v; state.dialogsFilter.limit = 50; render(); };
@@ -661,11 +662,16 @@ async function loadDialogItems(tok) {
     if (tok !== state.rt || !document.getElementById('dlBody')) return;
     if (f.filter === 'awaiting' && !f.q.trim()) state.awaiting = data.total;
     if (!data.items.length) {
-      document.getElementById('dlBody').innerHTML = f.filter === 'awaiting' && !f.q.trim() ? emptyState('check-circle', 'Все ответы отправлены', 'Новые обращения появятся здесь.') : emptyState('search', 'Никого не нашлось', '');
+      const empty = f.q.trim() ? emptyState('search', 'Никого не нашлось', '')
+        : f.filter === 'awaiting' ? emptyState('check-circle', 'Все ответы отправлены', 'Новые обращения появятся здесь.')
+        : f.filter === 'banned' ? emptyState('ban', 'Список спама пуст', 'Забаненные пользователи появятся здесь — отсюда их можно разбанить.')
+        : emptyState('search', 'Никого не нашлось', '');
+      document.getElementById('dlBody').innerHTML = empty;
       return;
     }
     const more = data.items.length < data.total;
-    document.getElementById('dlBody').innerHTML = `<div class="tr-list">${data.items.map(dialogRow).join('')}</div>` +
+    const row = f.filter === 'banned' ? bannedRow : dialogRow;
+    document.getElementById('dlBody').innerHTML = `<div class="tr-list">${data.items.map(row).join('')}</div>` +
       (more ? `<div class="tr-more">${btn('Показать ещё', { v: 'ghost', act: 'more-dialogs' })}<span class="tr-cap">${data.items.length} из ${data.total}</span></div>` : '');
     const nav = bottom.querySelector('.tr-tabbar'); if (nav) bottom.innerHTML = tabbarHtml();
   } catch (e) {
@@ -681,6 +687,17 @@ function dialogRow(u) {
     `<span class="tr-task__body"><span class="tr-task__top"><span class="tr-dialog__name" style="flex:1 1 auto">${esc(u.name || ('id' + u.user_id))}${u.username ? `<span> @${esc(u.username)}</span>` : ''}</span><span class="tr-task__time">${esc(fmtDT(u.last_message_at))}</span></span>` +
     (bot || badges ? `<span class="tr-task__meta">${bot}${badges}</span>` : '') + `</span></button>`;
 }
+// bannedRow is a dialog row with a one-tap "unban" button beside it.
+function bannedRow(u) {
+  return `<div class="tr-banrow">${dialogRow(u)}${ibtn('unlock', 'Разбанить', { tone: 'accent', act: 'unban-user', attrs: `data-id="${u.user_id}" data-bot="${u.bot_id}"` })}</div>`;
+}
+async function setBanned(userID, botID, banned) {
+  await api('POST', `/api/helpdesk/users/${userID}/ban?bot=${botID || 0}`, { banned });
+  haptic('success');
+  toast(banned ? 'Забанен как спам' : 'Разбанен');
+  render();
+}
+ACT['unban-user'] = el => withBusy(el, () => setBanned(Number(el.dataset.id), Number(el.dataset.bot || 0), false));
 ACT['open-user'] = el => openView({ type: 'user', id: Number(el.dataset.id), bot: Number(el.dataset.bot || 0) });
 
 async function renderDialog(userID, botID, tok) {
@@ -696,11 +713,13 @@ async function renderDialog(userID, botID, tok) {
   setTop({ title: u.name || 'Диалог', subtitle: (u.username ? '@' + u.username + ' · ' : '') + 'ID ' + u.user_id, back: true, actions: ibtn('more', 'Ещё', { act: 'dialog-menu' }) });
   const open = d.tickets.filter(t => isOpen(t.status));
   app.innerHTML =
+    (u.banned ? banner('Пользователь забанен как спам: его сообщения игнорируются', 'danger') : '') +
     `<div class="tr-card"><div class="tr-profile">${avatar(u.name, 'lg')}<div class="tr-profile__text"><b>${esc(u.name)}</b><span class="tr-cap">${u.username ? `<a class="tr-link" href="#" data-act="link" data-link="${esc(u.profile_url)}">@${esc(u.username)}</a>` : 'без username'}${u.language_code ? ' · ' + esc(u.language_code) : ''}</span></div></div>` +
     (userBadges(u) ? `<div class="tr-row" style="margin-top:12px">${userBadges(u)}</div>` : '') + `</div>` +
     (d.tickets.length ? `<section><h3 class="tr-overline">Тикеты · ${open.length} открыто</h3><div class="tr-list">${d.tickets.map(t => taskCard(t)).join('')}</div></section>` : '') +
     `<section><h3 class="tr-overline">Переписка</h3><div class="tr-chat" id="chat">${d.messages.length ? d.messages.map(bubble).join('') : emptyState('message', 'Сообщений нет', '')}</div></section>`;
-  setBottom(`<div class="tr-composer"><textarea id="hdReply" rows="1" placeholder="Ответ — уйдёт от имени бота" aria-label="Сообщение"></textarea>${ibtn('send', 'Отправить', { tone: 'fill', id: 'hdSend', act: 'hd-send', disabled: true })}</div>`);
+  setBottom(u.banned ? `<div class="tr-composer">${btn('Разбанить', { v: 'primary', block: true, icon: 'unlock', act: 'hd-unban' })}</div>`
+    : `<div class="tr-composer"><textarea id="hdReply" rows="1" placeholder="Ответ — уйдёт от имени бота" aria-label="Сообщение"></textarea>${ibtn('send', 'Отправить', { tone: 'fill', id: 'hdSend', act: 'hd-send', disabled: true })}</div>`);
   window.scrollTo(0, document.body.scrollHeight);
 }
 function bubble(m) { return `<div class="tr-bubble ${m.outgoing ? 'tr-bubble--out' : 'tr-bubble--in'}"><div>${esc(m.text)}</div><time>${esc(fmtDT(m.sent_at))}</time></div>`; }
@@ -720,11 +739,20 @@ ACT['dialog-menu'] = () => {
   const { d, userID, botID } = state.dialog, u = d.user;
   const items = [];
   if (u.topic_url) items.push({ label: 'Тема в группе', icon: 'external', onSelect: () => openLink(u.topic_url) });
+  if (u.banned) {
+    items.push({ label: 'Разбанить', icon: 'unlock', onSelect: () => setBanned(userID, botID, false).catch(e => toast(e.message, { error: true })) });
+    return openMenu(u.name || 'Диалог', items);
+  }
   items.push({ label: u.topic_closed ? 'Открыть тему' : 'Закрыть тему', icon: u.topic_closed ? 'unlock' : 'lock', onSelect: async () => {
     try { await api('POST', `/api/helpdesk/users/${userID}/topic?bot=${botID}`, { closed: !u.topic_closed }); toast(u.topic_closed ? 'Тема открыта' : 'Тема закрыта'); render(); } catch (e) { toast(e.message, { error: true }); }
   } });
   items.push({ label: 'Создать тикет', icon: 'plus', onSelect: async () => {
     try { toast('Оформляю тикет…'); const t = await api('POST', `/api/helpdesk/users/${userID}/ticket?bot=${botID}`); openView({ type: 'task', id: t.id }); toast('Тикет #' + t.id + ' создан'); } catch (e) { toast(e.message, { error: true }); }
   } });
+  items.push({ label: 'Спам — забанить', icon: 'ban', danger: true, onSelect: async () => {
+    if (!await confirmSheet('Забанить как спам?', 'Бот перестанет принимать сообщения этого пользователя, тема будет закрыта, открытые тикеты — закрыты как «не задача». Разбанить можно в Диалоги → Спам.', 'Забанить', true)) return;
+    try { await setBanned(userID, botID, true); } catch (e) { toast(e.message, { error: true }); }
+  } });
   openMenu(u.name || 'Диалог', items);
 };
+ACT['hd-unban'] = el => { const { userID, botID } = state.dialog; withBusy(el, () => setBanned(userID, botID, false)); };

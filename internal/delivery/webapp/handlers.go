@@ -417,7 +417,8 @@ func (s *Server) handleHDUsers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit := queryInt(q, "limit", 30, 1, 200)
 	offset := queryInt(q, "offset", 0, 0, 1<<30)
-	f := domain.HelpdeskUserFilter{AwaitingOnly: q.Get("filter") == "awaiting", Query: q.Get("q"), Limit: limit, Offset: offset}
+	f := domain.HelpdeskUserFilter{AwaitingOnly: q.Get("filter") == "awaiting", BannedOnly: q.Get("filter") == "banned",
+		Query: q.Get("q"), Limit: limit, Offset: offset}
 
 	var (
 		users []domain.HelpdeskUser
@@ -860,4 +861,30 @@ func queryInt(q url.Values, key string, def, minV, maxV int) int {
 		return def
 	}
 	return v
+}
+
+// handleHDBan bans the user as spam ({"banned": true}) or lifts the ban ({"banned": false}).
+func (s *Server) handleHDBan(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	var body struct {
+		Banned bool `json:"banned"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	hd, _, ok := s.helpdeskFor(r)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "бот сейчас не запущен")
+		return
+	}
+	u, err := hd.SetBanned(r.Context(), id, body.Banned)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.hdUserDTO(u))
 }

@@ -22,6 +22,8 @@ type HelpdeskUser struct {
 	TopicID       int    // message_thread_id; 0 = no topic yet
 	TopicClosed   bool
 	Blocked       bool       // the user blocked the bot
+	Banned        bool       // marked as spam: the bot silently ignores everything they write
+	BannedAt      *time.Time // when Banned was set
 	AwaitingSince *time.Time // first user message not answered by an operator yet
 	RemindedAt    *time.Time // last reminder about AwaitingSince
 	LastMessageAt *time.Time
@@ -64,9 +66,11 @@ type HelpdeskCard struct {
 // HelpdeskUserFilter selects users for the dialogs list.
 type HelpdeskUserFilter struct {
 	AwaitingOnly bool
-	Query        string
-	Limit        int
-	Offset       int
+	// BannedOnly lists only banned users; otherwise banned users are left out of the list.
+	BannedOnly bool
+	Query      string
+	Limit      int
+	Offset     int
 }
 
 // HelpdeskUserFilter.BotID (and the standalone botID parameters below) scope a shared store to one

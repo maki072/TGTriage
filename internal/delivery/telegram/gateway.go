@@ -190,3 +190,27 @@ func (g *Gateway) SendBackup(ctx context.Context, path, caption string) error {
 	defer f.Close()
 	return g.api.SendDocument(ctx, g.ownerID, filepath.Base(path), f, caption)
 }
+
+// spamCallback is the callback data of the "ban as spam" (ban=true) / "unban" button on a user's card.
+func spamCallback(userID int64, ban bool) string {
+	if ban {
+		return fmt.Sprintf("hb:ban:%d", userID)
+	}
+	return fmt.Sprintf("hb:unban:%d", userID)
+}
+
+func spamKeyboard(userID int64, banned bool) *telegram.InlineKeyboardMarkup {
+	if banned {
+		return kb(row(cb("✅ Разбанить", spamCallback(userID, false))))
+	}
+	return kb(row(cb("🚫 Спам — забанить", spamCallback(userID, true))))
+}
+
+func (g *Gateway) SendUserHeader(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error) {
+	m, err := g.api.SendMessage(ctx, telegram.SendMessageParams{ChatID: groupID, MessageThreadID: topicID, Text: text,
+		ParseMode: "HTML", ReplyMarkup: spamKeyboard(userID, false), LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true}})
+	if err != nil {
+		return 0, wrap(groupID, err)
+	}
+	return m.MessageID, nil
+}

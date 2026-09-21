@@ -132,6 +132,8 @@ type HelpdeskUser struct {
 	TopicURL      string  `json:"topic_url"`
 	TopicClosed   bool    `json:"topic_closed"`
 	Blocked       bool    `json:"blocked"`
+	Banned        bool    `json:"banned"`
+	BannedAt      *string `json:"banned_at"`
 	AwaitingSince *string `json:"awaiting_since"`
 	LastMessageAt *string `json:"last_message_at"`
 	CreatedAt     string  `json:"created_at"`
@@ -140,7 +142,7 @@ type HelpdeskUser struct {
 func toHDUserDTO(u *domain.HelpdeskUser, topicURL string, loc *time.Location) HelpdeskUser {
 	return HelpdeskUser{
 		UserID: u.UserID, BotID: u.BotID, Name: u.Name, Username: u.Username, LanguageCode: u.LanguageCode, Source: u.Source,
-		ProfileURL: profileURL(u.Username, u.UserID), TopicURL: topicURL, TopicClosed: u.TopicClosed, Blocked: u.Blocked,
+		ProfileURL: profileURL(u.Username, u.UserID), TopicURL: topicURL, TopicClosed: u.TopicClosed, Blocked: u.Blocked, Banned: u.Banned, BannedAt: fmtTimePtr(u.BannedAt, loc),
 		AwaitingSince: fmtTimePtr(u.AwaitingSince, loc), LastMessageAt: fmtTimePtr(u.LastMessageAt, loc),
 		CreatedAt: fmtTime(u.CreatedAt, loc),
 	}

@@ -247,6 +247,8 @@ button.tr-badge { border: 0; }
 .tr-avatar--lg { width: 48px; height: 48px; font-size: 20px; }
 .tr-avatar--sm { width: 32px; height: 32px; font-size: 14px; }
 .tr-dialog { align-items: center; }
+.tr-banrow { display: flex; align-items: center; gap: var(--space-1); }
+.tr-banrow > .tr-task { flex: 1 1 auto; min-width: 0; width: auto; }
 .tr-dialog__name { font: 600 16px/22px var(--font-sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tr-dialog__name span { font-weight: 400; color: var(--ink-muted); }
 

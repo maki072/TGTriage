@@ -27,6 +27,8 @@ type HelpdeskTransport interface {
 	// Copy copies messages without the author (an album keeps its grouping) and returns the copies' ids.
 	Copy(ctx context.Context, fromChatID int64, ids []int, toChatID int64, topicID, replyTo int) ([]int, error)
 	SendHTML(ctx context.Context, chatID int64, topicID int, text string, replyTo int) (int, error)
+	// SendUserHeader posts the user card that opens a topic, with a button that bans the user as spam.
+	SendUserHeader(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error)
 	EditText(ctx context.Context, chatID int64, messageID int, text string, entities json.RawMessage, caption bool) error
 	DeleteMessage(ctx context.Context, chatID int64, messageID int) error
 	IsChatMember(ctx context.Context, chatID, userID int64) (bool, error)
@@ -96,6 +98,7 @@ type HelpdeskService struct {
 	cfg       HelpdeskConfigStore // this bot's own helpdesk config (global Settings for the main bot)
 	transport HelpdeskTransport
 	triage    *TriageService
+	tickets   TicketDismisser
 	ownerID   int64
 	botID     int64 // the Telegram bot's own user id (for "message from myself" checks)
 	botDBID   int64 // 0 for the main bot, otherwise the row id in the bots table
@@ -147,6 +150,9 @@ func NewHelpdeskService(repo domain.HelpdeskRepository, messages domain.MessageR
 
 // SetTriage wires the triage service (it is created after the helpdesk).
 func (s *HelpdeskService) SetTriage(t *TriageService) { s.triage = t }
+
+// SetTickets wires the ticket closer used when a user is banned.
+func (s *HelpdeskService) SetTickets(t TicketDismisser) { s.tickets = t }
 
 // Start remembers the service lifetime context for background work.
 func (s *HelpdeskService) Start(ctx context.Context) { s.baseCtx = ctx }
@@ -233,6 +239,9 @@ func (s *HelpdeskService) OnUserMessage(ctx context.Context, in UserMessage) err
 	}
 	if isNew {
 		u = &domain.HelpdeskUser{BotID: s.botDBID, UserID: in.UserID}
+	} else if u.Banned {
+		s.log.Debug("message from a banned user dropped", "user_id", in.UserID)
+		return nil
 	}
 	renamed := !isNew && (u.Name != in.Name || u.Username != in.Username)
 	u.Name, u.Username = in.Name, in.Username
@@ -296,6 +305,9 @@ func (s *HelpdeskService) flushUserAlbum(ctx context.Context, userID int64, msgs
 		s.log.Error("album: load user", "user_id", userID, "err", err)
 		return
 	}
+	if u.Banned {
+		return // banned while the album was being collected
+	}
 	if err := s.ensureTopic(ctx, u, st.GroupID); err != nil {
 		s.log.Error("album: ensure topic", "user_id", userID, "err", err)
 		return
@@ -332,7 +344,7 @@ func (s *HelpdeskService) createTopic(ctx context.Context, u *domain.HelpdeskUse
 	if err := s.repo.SaveUser(ctx, u); err != nil {
 		return err
 	}
-	if _, err := s.transport.SendHTML(ctx, groupID, id, userHeader(u), 0); err != nil {
+	if _, err := s.transport.SendUserHeader(ctx, groupID, id, userHeader(u), u.UserID); err != nil {
 		s.log.Warn("post topic header", "user_id", u.UserID, "err", err)
 	}
 	s.log.Info("helpdesk topic created", "user_id", u.UserID, "topic_id", id)
@@ -473,6 +485,14 @@ func (s *HelpdeskService) OnOperatorMessage(ctx context.Context, in OperatorMess
 		return err
 	}
 	switch {
+	case IsSpamCommand(in.RawText):
+		if _, err := s.SetBanned(ctx, u.UserID, true); err != nil {
+			return err
+		}
+		if err := s.transport.DeleteMessage(ctx, in.GroupID, in.MessageID); err != nil {
+			s.log.Debug("delete /spam command", "err", err) // needs the "delete messages" admin right
+		}
+		return nil
 	case IsForceTicketCommand(in.RawText):
 		userID := u.UserID
 		s.detached("force ticket", func(ctx context.Context) { s.forceTicket(ctx, userID, in) })
@@ -839,6 +859,9 @@ func (s *HelpdeskService) ReplyToUser(ctx context.Context, userID int64, text st
 	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
 	if err != nil {
 		return err
+	}
+	if u.Banned {
+		return errBanned()
 	}
 	msgID, err := s.transport.SendHTML(ctx, userID, 0, html.EscapeString(text), 0)
 	if err != nil {

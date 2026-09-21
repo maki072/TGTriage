@@ -70,6 +70,7 @@ const operatorHelp = `<b>Хелпдеск</b>
 • <code>//</code> или <code>!</code> в начале — внутренняя заметка, пользователю не уходит
 • ответ командой <code>/1</code> на сообщение пользователя — создать тикет
 • перешлите сюда сообщение пользователя — тоже создастся тикет
+• команда <code>/spam</code> в теме или кнопка «Спам» под карточкой — забанить пользователя (разбан — в веб-панели: Диалоги → Спам)
 
 Основная работа с тикетами — в веб-панели.`
 
@@ -485,6 +486,9 @@ func (b *Bot) topicNotice(ctx context.Context, t *domain.Task, text string) {
 
 // groupCallback handles ticket card buttons pressed by operators in the helpdesk group.
 func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer func(string, bool)) error {
+	if len(p) >= 3 && p[0] == "hb" {
+		return b.banCallback(ctx, ref, p, answer)
+	}
 	if len(p) < 3 || p[0] != "hc" {
 		return nil
 	}
@@ -508,12 +512,19 @@ func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer
 		}
 		return b.api.EditMessageText(ctx, telegram.EditMessageTextParams{
 			ChatID: ref.ChatID, MessageID: ref.MessageID, Text: b.ticketCardText(t, b.ticketUser(ctx, t), true), ParseMode: "HTML",
-			ReplyMarkup:        kb(row(cb("Не задача", fmt.Sprintf("hc:fp:%d", t.ID))), row(cb("‹ Назад", fmt.Sprintf("hc:back:%d", t.ID)))),
+			ReplyMarkup: kb(row(cb("Не задача", fmt.Sprintf("hc:fp:%d", t.ID))), row(cb("🚫 Спам — забанить автора", fmt.Sprintf("hc:spam:%d", t.ID))),
+				row(cb("‹ Назад", fmt.Sprintf("hc:back:%d", t.ID)))),
 			LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true},
 		})
 	case "back":
 		b.publishTicket(ctx, t)
 		return nil
+	case "spam":
+		if !t.HasChat() {
+			return domain.ErrInvalidInput
+		}
+		_, err = b.helpdesk.SetBanned(ctx, t.ChatID, true)
+		notice = "Автор забанен как спам"
 	case "draft":
 		_, err = b.tasks.SendDraft(ctx, id)
 		notice = "Черновик отправлен пользователю"
@@ -536,5 +547,28 @@ func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer
 		return err
 	}
 	answer(notice, false)
+	return nil
+}
+
+// banCallback handles the spam button on a user's topic header: hb:ban:<user id> / hb:unban:<user id>.
+func (b *Bot) banCallback(ctx context.Context, ref *msgRef, p []string, answer func(string, bool)) error {
+	userID, err := strconv.ParseInt(p[2], 10, 64)
+	if err != nil || (p[1] != "ban" && p[1] != "unban") {
+		return domain.ErrInvalidInput
+	}
+	ban := p[1] == "ban"
+	if _, err := b.helpdesk.SetBanned(ctx, userID, ban); err != nil {
+		return err
+	}
+	if ban {
+		answer("Забанен как спам", false)
+	} else {
+		answer("Разбанен", false)
+	}
+	if ref != nil {
+		if err := b.api.EditMessageReplyMarkup(ctx, ref.ChatID, ref.MessageID, spamKeyboard(userID, ban)); err != nil && !telegram.IsNotModified(err) {
+			b.log.Debug("update spam button", "err", err)
+		}
+	}
 	return nil
 }
