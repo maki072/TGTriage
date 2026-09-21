@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -16,6 +17,9 @@ type SchedulerNotifier interface {
 	TaskReminder(ctx context.Context, t *domain.Task)
 	// PersonalNudge fires a repeated reminder about an open personal-chat task.
 	PersonalNudge(ctx context.Context, t *domain.Task)
+	// TicketsDigest posts the morning summary of open tickets into the bot's tickets topic (nothing
+	// when there are none).
+	TicketsDigest(ctx context.Context)
 }
 
 // Scheduler runs periodic jobs: snooze reminders, morning digest, history retention, helpdesk
@@ -80,6 +84,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 	s.fireReminders(ctx)
 	s.personalNudges(ctx)
 	s.digest(ctx)
+	s.ticketsDigest(ctx)
 	s.cleanup(ctx)
 	for _, h := range s.helpdesks.All() {
 		h.CheckReminders(ctx)
@@ -133,30 +138,51 @@ func (s *Scheduler) personalNudges(ctx context.Context) {
 	}
 }
 
-// digest sends the morning digest once a day within 3 hours after the configured time.
-func (s *Scheduler) digest(ctx context.Context) {
-	st := s.settings.Get()
-	if !st.DigestEnabled {
-		return
-	}
-	h, m, err := ParseClock(st.DigestTime)
+// digestDue reports whether the morning digest recorded under metaKey is due: it is sent once a day
+// within 3 hours after the configured digest time. It marks the day as done before returning true,
+// so a failed delivery cannot repeat every tick.
+func (s *Scheduler) digestDue(ctx context.Context, metaKey string) bool {
+	h, m, err := ParseClock(s.settings.Get().DigestTime)
 	if err != nil {
-		return
+		return false
 	}
 	loc := s.settings.Location()
 	now := time.Now().In(loc)
 	target := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, loc)
 	if now.Before(target) || now.Sub(target) > 3*time.Hour {
-		return
+		return false
 	}
 	today := now.Format(time.DateOnly)
-	last, err := s.settings.Meta(ctx, "last_digest")
+	last, err := s.settings.Meta(ctx, metaKey)
 	if err != nil || last == today {
-		return
+		return false
 	}
-	// mark first: a failed delivery must not spam the owner every tick
-	if err := s.settings.SetMeta(ctx, "last_digest", today); err != nil {
-		s.log.Error("save digest mark", "err", err)
+	if err := s.settings.SetMeta(ctx, metaKey, today); err != nil {
+		s.log.Error("save digest mark", "key", metaKey, "err", err)
+		return false
+	}
+	return true
+}
+
+// ticketsDigest posts every live desk's open tickets into its tickets topic at the digest time. It
+// does not depend on the personal digest switch: the tickets are the operators', not the owner's.
+func (s *Scheduler) ticketsDigest(ctx context.Context) {
+	for _, h := range s.helpdesks.All() {
+		if !h.Active() {
+			continue
+		}
+		if !s.digestDue(ctx, fmt.Sprintf("last_tickets_digest_%d", h.BotDBID())) {
+			continue
+		}
+		if n, ok := s.notifiers.For(h.BotDBID()); ok {
+			n.TicketsDigest(ctx)
+		}
+	}
+}
+
+// digest sends the morning digest once a day within 3 hours after the configured time.
+func (s *Scheduler) digest(ctx context.Context) {
+	if !s.settings.Get().DigestEnabled || !s.digestDue(ctx, "last_digest") {
 		return
 	}
 	d, err := s.tasks.BuildDigest(ctx, domain.ScopeAll, "")

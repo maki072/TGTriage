@@ -286,26 +286,33 @@ func (b *Bot) taskAction(ctx context.Context, ref *msgRef, action string, id int
 	return domain.ErrInvalidInput
 }
 
-func (b *Bot) snoozeAction(ctx context.Context, ref *msgRef, id int64, opt string, answer func(string, bool)) error {
+// snoozeDeadline resolves an option of the snooze keyboards: "tm" is tomorrow 09:00, otherwise a
+// number of minutes from now.
+func (b *Bot) snoozeDeadline(opt string) (time.Time, error) {
 	loc := b.settings.Location()
 	now := time.Now().In(loc)
-	var until time.Time
-	switch opt {
-	case "c":
+	if opt == "tm" {
+		d := now.AddDate(0, 0, 1)
+		return time.Date(d.Year(), d.Month(), d.Day(), 9, 0, 0, 0, loc), nil
+	}
+	minutes, err := strconv.Atoi(opt)
+	if err != nil || minutes <= 0 {
+		return time.Time{}, domain.ErrInvalidInput
+	}
+	return now.Add(time.Duration(minutes) * time.Minute), nil
+}
+
+func (b *Bot) snoozeAction(ctx context.Context, ref *msgRef, id int64, opt string, answer func(string, bool)) error {
+	if opt == "c" {
 		b.states.set(dialogState{Kind: stateSnoozeCustom, TaskID: id})
 		answer("Жду срок", false)
 		return b.sendText(ctx, "Отправьте срок для задачи #"+strconv.FormatInt(id, 10)+".\n"+
 			"Примеры: <code>45m</code>, <code>2h</code>, <code>1d</code>, <code>18:00</code>, <code>завтра 10:00</code>, <code>20.09 12:00</code>",
 			kb(row(cb("Отмена", "cx"))))
-	case "tm":
-		d := now.AddDate(0, 0, 1)
-		until = time.Date(d.Year(), d.Month(), d.Day(), 9, 0, 0, 0, loc)
-	default:
-		minutes, err := strconv.Atoi(opt)
-		if err != nil || minutes <= 0 {
-			return domain.ErrInvalidInput
-		}
-		until = now.Add(time.Duration(minutes) * time.Minute)
+	}
+	until, err := b.snoozeDeadline(opt)
+	if err != nil {
+		return err
 	}
 	t, err := b.tasks.Snooze(ctx, id, until)
 	if err != nil {

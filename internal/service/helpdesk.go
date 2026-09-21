@@ -27,6 +27,8 @@ type HelpdeskTransport interface {
 	// Copy copies messages without the author (an album keeps its grouping) and returns the copies' ids.
 	Copy(ctx context.Context, fromChatID int64, ids []int, toChatID int64, topicID, replyTo int) ([]int, error)
 	SendHTML(ctx context.Context, chatID int64, topicID int, text string, replyTo int) (int, error)
+	// SendReminder posts the "user is waiting" reminder with a "snooze" button.
+	SendReminder(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error)
 	// SendUserHeader posts the user card that opens a topic, with a button that bans the user as spam.
 	SendUserHeader(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error)
 	// SendCaptcha sends the "I am not a bot" prompt with its button to the user.
@@ -185,6 +187,9 @@ func (s *HelpdeskService) GroupID() int64 {
 	}
 	return 0
 }
+
+// BotDBID is 0 for the main bot's desk, otherwise the row id of the additional bot it belongs to.
+func (s *HelpdeskService) BotDBID() int64 { return s.botDBID }
 
 // ConfiguredGroupID returns the group set for this bot's desk regardless of the enabled switch —
 // for "is this chat the one bound to my desk" checks that must still fire while it's disabled.
@@ -1013,11 +1018,48 @@ func (s *HelpdeskService) TicketsTopic(ctx context.Context) (int64, int, error) 
 	return s.namedTopic(ctx, &s.ticketsMu, ticketsTopicMetaKey(s.GroupID()), ticketsTopicName)
 }
 
-// ForgetTicketsTopic drops a tickets topic that turned out to be deleted.
+// ForgetTicketsTopic drops a tickets topic that turned out to be deleted, together with the menu
+// message that lived in it.
 func (s *HelpdeskService) ForgetTicketsTopic(ctx context.Context, groupID int64) {
-	if err := s.settings.SetMeta(ctx, ticketsTopicMetaKey(groupID), ""); err != nil {
-		s.log.Warn("forget tickets topic", "err", err)
+	for _, key := range []string{ticketsTopicMetaKey(groupID), ticketsMenuMetaKey(groupID)} {
+		if err := s.settings.SetMeta(ctx, key, ""); err != nil {
+			s.log.Warn("forget tickets topic", "err", err)
+		}
 	}
+}
+
+func ticketsMenuMetaKey(groupID int64) string { return fmt.Sprintf("hd_tickets_menu_%d", groupID) }
+
+func ticketsPrunedMetaKey(groupID int64) string { return fmt.Sprintf("hd_tickets_pruned_%d", groupID) }
+
+// TicketsTopicID returns the id of the tickets topic without creating it (0 when there is none).
+func (s *HelpdeskService) TicketsTopicID(ctx context.Context) int {
+	v, _ := s.settings.Meta(ctx, ticketsTopicMetaKey(s.GroupID()))
+	id, _ := strconv.Atoi(v)
+	return id
+}
+
+// TicketsMenuID returns the message id of the ticket management menu in the tickets topic (0 when
+// it has not been posted yet).
+func (s *HelpdeskService) TicketsMenuID(ctx context.Context, groupID int64) int {
+	v, _ := s.settings.Meta(ctx, ticketsMenuMetaKey(groupID))
+	id, _ := strconv.Atoi(v)
+	return id
+}
+
+func (s *HelpdeskService) SetTicketsMenuID(ctx context.Context, groupID int64, id int) error {
+	return s.settings.SetMeta(ctx, ticketsMenuMetaKey(groupID), strconv.Itoa(id))
+}
+
+// TicketsPruned reports whether the ticket cards that older versions duplicated into the tickets
+// topic have already been cleaned up; MarkTicketsPruned records that.
+func (s *HelpdeskService) TicketsPruned(ctx context.Context, groupID int64) bool {
+	v, _ := s.settings.Meta(ctx, ticketsPrunedMetaKey(groupID))
+	return v == "1"
+}
+
+func (s *HelpdeskService) MarkTicketsPruned(ctx context.Context, groupID int64) error {
+	return s.settings.SetMeta(ctx, ticketsPrunedMetaKey(groupID), "1")
 }
 
 func (s *HelpdeskService) SaveCard(ctx context.Context, c domain.HelpdeskCard) error {
@@ -1026,6 +1068,14 @@ func (s *HelpdeskService) SaveCard(ctx context.Context, c domain.HelpdeskCard) e
 
 func (s *HelpdeskService) Cards(ctx context.Context, taskID int64) ([]domain.HelpdeskCard, error) {
 	return s.repo.Cards(ctx, taskID)
+}
+
+func (s *HelpdeskService) CardsInTopic(ctx context.Context, groupID int64, topicID int) ([]domain.HelpdeskCard, error) {
+	return s.repo.CardsInTopic(ctx, groupID, topicID)
+}
+
+func (s *HelpdeskService) DeleteCard(ctx context.Context, c domain.HelpdeskCard) error {
+	return s.repo.DeleteCard(ctx, c)
 }
 
 // ---------- reminders ----------
@@ -1062,7 +1112,7 @@ func (s *HelpdeskService) remind(ctx context.Context, userID int64, h domain.Hel
 		return
 	}
 	text := fmt.Sprintf("⏰ <b>Пользователь ждёт ответа %s</b>", humanDuration(now.Sub(*u.AwaitingSince)))
-	if _, err := s.transport.SendHTML(ctx, h.GroupID, u.TopicID, text, 0); err != nil {
+	if _, err := s.transport.SendReminder(ctx, h.GroupID, u.TopicID, text, userID); err != nil {
 		s.log.Warn("send reminder", "user_id", userID, "err", err)
 		if errors.Is(err, domain.ErrTopicGone) {
 			u.TopicID = 0
@@ -1072,6 +1122,28 @@ func (s *HelpdeskService) remind(ctx context.Context, userID int64, h domain.Hel
 	if err := s.repo.SaveUser(ctx, u); err != nil {
 		s.log.Error("save reminder mark", "err", err)
 	}
+}
+
+// SnoozeReminder holds back the "user is waiting" reminders about userID until the given moment;
+// after that they resume at the usual interval. An operator's answer ends the wait and the snooze
+// with it. RemindedAt is set so that the reminder comes due exactly at until.
+func (s *HelpdeskService) SnoozeReminder(ctx context.Context, userID int64, until time.Time) error {
+	if !until.After(time.Now()) {
+		return domain.ErrInvalidInput
+	}
+	lock := s.userLock(userID)
+	lock.Lock()
+	defer lock.Unlock()
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
+	if err != nil {
+		return err
+	}
+	if u.AwaitingSince == nil {
+		return fmt.Errorf("%w: пользователь уже получил ответ", domain.ErrInvalidInput)
+	}
+	mark := until.Add(-time.Duration(max(s.cfg.Get().ReminderMinutes, 0)) * time.Minute)
+	u.RemindedAt = &mark
+	return s.repo.SaveUser(ctx, u)
 }
 
 // CleanupMessages drops message mappings older than before.

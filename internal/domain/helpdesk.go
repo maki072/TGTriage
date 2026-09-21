@@ -101,6 +101,9 @@ type HelpdeskRepository interface {
 
 	SaveCard(ctx context.Context, c HelpdeskCard) error
 	Cards(ctx context.Context, taskID int64) ([]HelpdeskCard, error)
+	// CardsInTopic lists the ticket cards posted into one topic of a group.
+	CardsInTopic(ctx context.Context, chatID int64, topicID int) ([]HelpdeskCard, error)
+	DeleteCard(ctx context.Context, c HelpdeskCard) error
 }
 
 // Hold states of a not yet verified user: while set, their messages are kept aside instead of

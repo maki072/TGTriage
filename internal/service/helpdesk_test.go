@@ -104,6 +104,10 @@ func (f *fakeTransport) EditText(_ context.Context, chat int64, msg int, text st
 
 func (f *fakeTransport) DeleteMessage(context.Context, int64, int) error { return nil }
 
+func (f *fakeTransport) SendReminder(ctx context.Context, chat int64, topic int, text string, _ int64) (int, error) {
+	return f.SendHTML(ctx, chat, topic, text, 0)
+}
+
 func (f *fakeTransport) SendUserHeader(ctx context.Context, chat int64, topic int, text string, _ int64) (int, error) {
 	return f.SendHTML(ctx, chat, topic, text, 0)
 }
@@ -582,5 +586,45 @@ func TestOperatorReplyVerifiesUserAndLLMFlagOnlyForNewcomers(t *testing.T) {
 	}
 	if _, ok := fx.svc.SuspectSpam(ctx, 81, 0.99); ok {
 		t.Error("a verified user must never be flagged")
+	}
+}
+
+func TestSnoozedReminderComesDueAtTheSnoozeEnd(t *testing.T) {
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, nil)
+	fx.userSays(t, 10, "Жду ответа")
+	u, _ := fx.svc.User(ctx, 42)
+	past := time.Now().Add(-20 * time.Minute)
+	u.AwaitingSince = &past
+	if err := fx.store.Helpdesk.SaveUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fx.svc.SnoozeReminder(ctx, 42, time.Now().Add(-time.Minute)); err == nil {
+		t.Error("a snooze in the past must be rejected")
+	}
+	until := time.Now().Add(time.Hour)
+	if err := fx.svc.SnoozeReminder(ctx, 42, until); err != nil {
+		t.Fatal(err)
+	}
+	before := len(fx.tr.sentTo(testGroup))
+	fx.svc.CheckReminders(ctx)
+	if got := fx.tr.sentTo(testGroup)[before:]; len(got) != 0 {
+		t.Fatalf("no reminder while snoozed: %+v", got)
+	}
+	// at the snooze end the reminder is due at once, not another interval later
+	due, err := fx.store.Helpdesk.DueReminders(ctx, 0, until.Add(time.Second).Add(-15*time.Minute))
+	if err != nil || len(due) != 1 {
+		t.Fatalf("reminder must come due at the snooze end: %+v err=%v", due, err)
+	}
+
+	// an operator's answer ends the wait: nothing left to snooze
+	u, _ = fx.svc.User(ctx, 42)
+	u.AwaitingSince = nil
+	if err := fx.store.Helpdesk.SaveUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.svc.SnoozeReminder(ctx, 42, until); err == nil {
+		t.Error("snoozing an answered user must fail")
 	}
 }

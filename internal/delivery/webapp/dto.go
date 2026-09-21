@@ -104,6 +104,14 @@ func toTaskDTO(t domain.Task, loc *time.Location) Task {
 	}
 }
 
+// forOperator drops what belongs to the owner's triage rather than to the support desk: the model
+// that analysed the message, the importance axis and the personal reminder. Operators get a
+// simplified ticket view; the frontend hides the matching controls.
+func (t Task) forOperator() Task {
+	t.Confidence, t.Provider, t.Model, t.Importance, t.RemindAt = 0, "", "", "", nil
+	return t
+}
+
 func toTaskDTOs(ts []domain.Task, loc *time.Location) []Task {
 	out := make([]Task, len(ts))
 	for i, t := range ts {

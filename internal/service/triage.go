@@ -415,23 +415,38 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 		return nil
 	}
 
+	var target *domain.Task
 	if analysis.UpdateTaskID > 0 {
 		t, err := s.tasks.Get(ctx, analysis.UpdateTaskID)
 		// The connection_id check (helpdesk only) keeps two organizations' bots from merging into
 		// each other's ticket when the same Telegram user happens to write to both.
 		sameBot := !helpdesk || t.ConnectionID == b.key.connID
 		if err == nil && t.ChatID == b.key.chatID && t.IsHelpdesk() == helpdesk && sameBot && t.Status.IsOpen() {
-			s.merge(t, analysis, live)
-			if err := s.tasks.Update(ctx, t); err != nil {
-				return err
-			}
-			if err := s.analyses.SetTaskID(ctx, rec.ID, t.ID); err != nil {
-				log.Warn("link analysis to task", "err", err)
-			}
-			s.notifyTask(ctx, t, false)
-			return nil
+			target = t
+		} else {
+			log.Warn("model referenced unknown or foreign task", "task_id", analysis.UpdateTaskID)
 		}
-		log.Warn("model referenced unknown or foreign task, creating a new one", "task_id", analysis.UpdateTaskID)
+	}
+	if target == nil && helpdesk {
+		// A user with an open ticket does not get a second one from the model: small models tend to
+		// open a new ticket for every "ok, thanks". The follow-up joins the newest open ticket, and an
+		// operator can still open a separate one by hand (/1).
+		for i := range openTasks {
+			if target == nil || openTasks[i].ID > target.ID {
+				target = &openTasks[i]
+			}
+		}
+	}
+	if target != nil {
+		s.merge(target, analysis, live)
+		if err := s.tasks.Update(ctx, target); err != nil {
+			return err
+		}
+		if err := s.analyses.SetTaskID(ctx, rec.ID, target.ID); err != nil {
+			log.Warn("link analysis to task", "err", err)
+		}
+		s.notifyTask(ctx, target, false)
+		return nil
 	}
 
 	t := &domain.Task{

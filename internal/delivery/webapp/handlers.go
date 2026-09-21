@@ -174,11 +174,20 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		handleErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, TaskList{Items: toTaskDTOs(items, s.loc()), Total: total, Limit: limit, Offset: offset})
+	dtos := toTaskDTOs(items, s.loc())
+	if !principalFrom(r).isOwner() {
+		for i := range dtos {
+			dtos[i] = dtos[i].forOperator()
+		}
+	}
+	writeJSON(w, http.StatusOK, TaskList{Items: dtos, Total: total, Limit: limit, Offset: offset})
 }
 
 func (s *Server) taskResponse(ctx context.Context, t *domain.Task) Task {
 	dto := toTaskDTO(*t, s.loc())
+	if !principalFromCtx(ctx).isOwner() {
+		dto = dto.forOperator()
+	}
 	if t.IsHelpdesk() && t.HasChat() {
 		if hd, ok := s.helpdeskRuntime(domain.ParseHelpdeskBotID(t.ConnectionID)); ok {
 			if u, err := hd.User(ctx, t.ChatID); err == nil {
@@ -285,9 +294,13 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	importance := domain.Priority(body.Importance)
+	if !principalFrom(r).isOwner() {
+		importance = t.Importance // operators do not see or change the owner's importance axis
+	}
 	t, err := s.tasks.Edit(r.Context(), t.ID, service.EditInput{
 		Title: body.Title, Description: body.Description,
-		Priority: domain.Priority(body.Priority), Importance: domain.Priority(body.Importance),
+		Priority: domain.Priority(body.Priority), Importance: importance,
 	})
 	if err != nil {
 		handleErr(w, err)
@@ -479,8 +492,14 @@ func (s *Server) handleHDUser(w http.ResponseWriter, r *http.Request) {
 		handleErr(w, err)
 		return
 	}
+	dtos := toTaskDTOs(tickets, s.loc())
+	if !principalFrom(r).isOwner() {
+		for i := range dtos {
+			dtos[i] = dtos[i].forOperator()
+		}
+	}
 	writeJSON(w, http.StatusOK, HelpdeskDialog{
-		User: s.hdUserDTO(u), Messages: toDialogMessages(msgs, s.loc()), Held: toHeldMessages(held, s.loc()), Tickets: toTaskDTOs(tickets, s.loc()),
+		User: s.hdUserDTO(u), Messages: toDialogMessages(msgs, s.loc()), Held: toHeldMessages(held, s.loc()), Tickets: dtos,
 	})
 }
 

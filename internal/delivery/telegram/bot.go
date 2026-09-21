@@ -75,6 +75,7 @@ func (b *Bot) Run(ctx context.Context) {
 		b.log.Warn("setMyCommands for owner failed", "err", err)
 	}
 	b.EnsureMenuButton(ctx)
+	go b.EnsureTicketsMenu(ctx)
 	b.api.Poll(ctx, b.handle)
 }
 

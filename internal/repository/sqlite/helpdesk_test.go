@@ -130,3 +130,25 @@ func TestHelpdeskRepoBanAndHold(t *testing.T) {
 		t.Errorf("held messages must be deleted: %+v", held)
 	}
 }
+
+func TestHelpdeskCards(t *testing.T) {
+	ctx := context.Background()
+	r := openTestStore(t).Helpdesk
+
+	own := domain.HelpdeskCard{TaskID: 7, ChatID: -1001, TopicID: 55, MessageID: 900}
+	dup := domain.HelpdeskCard{TaskID: 7, ChatID: -1001, TopicID: 63, MessageID: 901}
+	for _, c := range []domain.HelpdeskCard{own, dup} {
+		if err := r.SaveCard(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := r.CardsInTopic(ctx, -1001, 63); err != nil || len(got) != 1 || got[0] != dup {
+		t.Fatalf("cards in topic: %+v err=%v", got, err)
+	}
+	if err := r.DeleteCard(ctx, dup); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := r.Cards(ctx, 7); len(got) != 1 || got[0] != own {
+		t.Errorf("only the deleted card must go: %+v", got)
+	}
+}

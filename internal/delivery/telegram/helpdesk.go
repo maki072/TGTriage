@@ -73,6 +73,7 @@ const operatorHelp = `<b>Хелпдеск</b>
 • ответ командой <code>/1</code> на сообщение пользователя — создать тикет
 • перешлите сюда сообщение пользователя — тоже создастся тикет
 • команда <code>/spam</code> в теме или кнопка «Спам» под карточкой — забанить пользователя (разбан — в веб-панели: Диалоги → Спам)
+• тема «🎫 Тикеты» — меню управления тикетами и утренний список открытых; <code>/menu</code> в ней вернёт меню
 
 Основная работа с тикетами — в веб-панели.`
 
@@ -167,6 +168,14 @@ func (b *Bot) onGroupMessage(ctx context.Context, m *telegram.Message) {
 		return // our own copies and other bots
 	}
 	if !m.IsTopicMessage || m.MessageThreadID == 0 {
+		return
+	}
+	if cmd, _ := parseCommand(m.Text); (cmd == "/menu" || cmd == "/tickets") && m.MessageThreadID == b.helpdesk.TicketsTopicID(ctx) {
+		// the menu was deleted or scrolled away: post it again
+		b.postTicketsMenu(ctx, true)
+		if err := b.api.DeleteMessage(ctx, group, m.MessageID); err != nil {
+			b.log.Debug("delete menu command", "err", err)
+		}
 		return
 	}
 	raw := m.Text
@@ -384,16 +393,27 @@ func (b *Bot) ticketKeyboard(t *domain.Task, u *domain.HelpdeskUser, withTopicLi
 		rows = append(rows, row(cb("Вернуть в работу", d("reopen"))))
 	}
 	var links []button
-	if link := b.helpdesk.TopicURL(u); withTopicLink && link != "" && u != nil {
-		links = append(links, button{Text: "Тема", URL: link})
+	if withTopicLink && u != nil {
+		if link := b.helpdesk.TopicURL(u); link != "" {
+			links = append(links, button{Text: "Тема", URL: link})
+		}
 	}
-	if b.settings.Get().WebAppPublicURL != "" && b.cfg.BotUsername != "" {
-		links = append(links, button{Text: "В панели", URL: fmt.Sprintf("https://t.me/%s?start=t%d", b.cfg.BotUsername, t.ID)})
+	if link := b.panelTicketLink(t); link != "" {
+		links = append(links, button{Text: "В панели", URL: link})
 	}
 	if len(links) > 0 {
 		rows = append(rows, links)
 	}
 	return &telegram.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// panelTicketLink is the deep link that opens a ticket in the web panel via the bot's private chat
+// (empty while the panel has no public address).
+func (b *Bot) panelTicketLink(t *domain.Task) string {
+	if b.settings.Get().WebAppPublicURL == "" || b.cfg.BotUsername == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://t.me/%s?start=t%d", b.cfg.BotUsername, t.ID)
 }
 
 func (b *Bot) ticketUser(ctx context.Context, t *domain.Task) *domain.HelpdeskUser {
@@ -407,8 +427,9 @@ func (b *Bot) ticketUser(ctx context.Context, t *domain.Task) *domain.HelpdeskUs
 	return u
 }
 
-// publishTicket posts ticket cards into the user's topic (pinned) and the tickets topic, or updates
-// the cards posted before.
+// publishTicket posts the ticket card into the user's topic (pinned) or updates the one posted
+// before. Only a ticket without a topic of its own falls back to the tickets topic; that topic
+// otherwise holds nothing but the management menu (see tickets.go).
 func (b *Bot) publishTicket(ctx context.Context, t *domain.Task) {
 	if !b.helpdesk.Active() {
 		return
@@ -420,17 +441,23 @@ func (b *Bot) publishTicket(ctx context.Context, t *domain.Task) {
 		return
 	}
 	group := b.helpdesk.GroupID()
-	if len(cards) > 0 {
-		for _, c := range cards {
-			inTickets := u == nil || c.TopicID != u.TopicID
-			err := b.api.EditMessageText(ctx, telegram.EditMessageTextParams{
-				ChatID: c.ChatID, MessageID: c.MessageID, Text: b.ticketCardText(t, u, inTickets), ParseMode: "HTML",
-				ReplyMarkup: b.ticketKeyboard(t, u, inTickets), LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true},
-			})
-			if err != nil && !telegram.IsNotModified(err) {
-				b.log.Debug("update ticket card", "task_id", t.ID, "err", err)
-			}
+	hasTopic := u != nil && u.HasTopic(group)
+	placed := false
+	for _, c := range cards {
+		if hasTopic && c.TopicID != u.TopicID {
+			b.dropCard(ctx, c) // a copy in the tickets topic left by older versions, or in a deleted topic
+			continue
 		}
+		placed = true
+		err := b.api.EditMessageText(ctx, telegram.EditMessageTextParams{
+			ChatID: c.ChatID, MessageID: c.MessageID, Text: b.ticketCardText(t, u, !hasTopic), ParseMode: "HTML",
+			ReplyMarkup: b.ticketKeyboard(t, u, !hasTopic), LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true},
+		})
+		if err != nil && !telegram.IsNotModified(err) {
+			b.log.Debug("update ticket card", "task_id", t.ID, "err", err)
+		}
+	}
+	if placed {
 		return
 	}
 
@@ -447,12 +474,13 @@ func (b *Bot) publishTicket(ctx context.Context, t *domain.Task) {
 		}
 		return m.MessageID, nil
 	}
-	if u != nil && u.HasTopic(group) {
+	if hasTopic {
 		if id, err := post(u.TopicID, false); err != nil {
 			b.log.Warn("post ticket card to user topic", "task_id", t.ID, "err", err)
 		} else if err := b.api.PinChatMessage(ctx, group, id); err != nil {
 			b.log.Debug("pin ticket card", "err", err)
 		}
+		return
 	}
 	_, ticketsTopic, err := b.helpdesk.TicketsTopic(ctx)
 	if err != nil {
@@ -486,10 +514,76 @@ func (b *Bot) topicNotice(ctx context.Context, t *domain.Task, text string) {
 	}
 }
 
-// groupCallback handles ticket card buttons pressed by operators in the helpdesk group.
+// dropCard deletes a ticket card message and forgets it. The message may already be gone (or its
+// topic deleted), so a failed delete is not an error.
+func (b *Bot) dropCard(ctx context.Context, c domain.HelpdeskCard) {
+	if err := b.api.DeleteMessage(ctx, c.ChatID, c.MessageID); err != nil {
+		b.log.Debug("delete ticket card", "task_id", c.TaskID, "err", err)
+	}
+	if err := b.helpdesk.DeleteCard(ctx, c); err != nil {
+		b.log.Warn("forget ticket card", "task_id", c.TaskID, "err", err)
+	}
+}
+
+// ticketAction applies a ticket button (the part after "hc:" / "hm:a:") and returns the text to show
+// the operator. "z<option>" snoozes the ticket, see snoozeDeadline.
+func (b *Bot) ticketAction(ctx context.Context, t *domain.Task, action string) (string, error) {
+	var err error
+	switch {
+	case action == "spam":
+		if !t.HasChat() {
+			return "", domain.ErrInvalidInput
+		}
+		_, err = b.helpdesk.SetBanned(ctx, t.ChatID, true)
+		return "Автор забанен как спам", err
+	case action == "draft":
+		_, err = b.tasks.SendDraft(ctx, t.ID)
+		return "Черновик отправлен пользователю", err
+	case action == "work":
+		_, err = b.tasks.SetStatus(ctx, t.ID, domain.StatusInProgress)
+		return "Взято в работу", err
+	case action == "done":
+		_, err = b.tasks.SetStatus(ctx, t.ID, domain.StatusDone)
+		return "Тикет закрыт", err
+	case action == "fp":
+		_, err = b.tasks.SetStatus(ctx, t.ID, domain.StatusFalsePositive)
+		return "Отмечено: не задача", err
+	case action == "reopen":
+		_, err = b.tasks.SetStatus(ctx, t.ID, domain.StatusNew)
+		return "Тикет возвращён", err
+	case strings.HasPrefix(action, "z"):
+		until, derr := b.snoozeDeadline(action[1:])
+		if derr != nil {
+			return "", derr
+		}
+		_, err = b.tasks.Snooze(ctx, t.ID, until)
+		return "Отложено до " + b.fmtShort(until), err
+	}
+	return "", domain.ErrInvalidInput
+}
+
+// snoozePeriods offers the snooze periods of the group keyboards (no custom time: nobody could
+// type it in a shared chat); data builds the callback data of an option, back is the "Назад" data.
+func snoozePeriods(data func(opt string) string, back string) *telegram.InlineKeyboardMarkup {
+	return kb(
+		row(cb("30 мин", data("30")), cb("1 час", data("60")), cb("3 часа", data("180"))),
+		row(cb("Завтра 09:00", data("tm")), cb("3 дня", data("4320")), cb("Неделя", data("10080"))),
+		row(cb("‹ Назад", back)),
+	)
+}
+
+// groupCallback handles the buttons pressed by operators in the helpdesk group: ticket cards (hc),
+// spam buttons (hb), reminders (hr) and the tickets menu (hm).
 func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer func(string, bool)) error {
-	if len(p) >= 3 && p[0] == "hb" {
-		return b.banCallback(ctx, ref, p, answer)
+	if len(p) >= 3 {
+		switch p[0] {
+		case "hb":
+			return b.banCallback(ctx, ref, p, answer)
+		case "hr":
+			return b.reminderCallback(ctx, ref, p, answer)
+		case "hm":
+			return b.menuCallback(ctx, ref, p, answer)
+		}
 	}
 	if len(p) < 3 || p[0] != "hc" {
 		return nil
@@ -505,46 +599,27 @@ func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer
 	if !t.IsHelpdesk() {
 		return domain.ErrForbidden
 	}
-	var notice string
-	switch p[1] {
-	case "more":
-		// the rare actions replace the card's keyboard until "Назад"
+	// the rare actions replace the card's keyboard until "Назад"
+	edit := func(markup *telegram.InlineKeyboardMarkup) error {
 		if ref == nil {
 			return nil
 		}
 		return b.api.EditMessageText(ctx, telegram.EditMessageTextParams{
-			ChatID: ref.ChatID, MessageID: ref.MessageID, Text: b.ticketCardText(t, b.ticketUser(ctx, t), true), ParseMode: "HTML",
-			ReplyMarkup: kb(row(cb("Не задача", fmt.Sprintf("hc:fp:%d", t.ID))), row(cb("🚫 Спам — забанить автора", fmt.Sprintf("hc:spam:%d", t.ID))),
-				row(cb("‹ Назад", fmt.Sprintf("hc:back:%d", t.ID)))),
-			LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true},
+			ChatID: ref.ChatID, MessageID: ref.MessageID, Text: b.ticketCardText(t, b.ticketUser(ctx, t), false), ParseMode: "HTML",
+			ReplyMarkup: markup, LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true},
 		})
+	}
+	switch p[1] {
+	case "more":
+		return edit(kb(row(cb("Отложить…", fmt.Sprintf("hc:snz:%d", t.ID))), row(cb("Не задача", fmt.Sprintf("hc:fp:%d", t.ID))),
+			row(cb("🚫 Спам — забанить автора", fmt.Sprintf("hc:spam:%d", t.ID))), row(cb("‹ Назад", fmt.Sprintf("hc:back:%d", t.ID)))))
+	case "snz":
+		return edit(snoozePeriods(func(opt string) string { return fmt.Sprintf("hc:z%s:%d", opt, t.ID) }, fmt.Sprintf("hc:more:%d", t.ID)))
 	case "back":
 		b.publishTicket(ctx, t)
 		return nil
-	case "spam":
-		if !t.HasChat() {
-			return domain.ErrInvalidInput
-		}
-		_, err = b.helpdesk.SetBanned(ctx, t.ChatID, true)
-		notice = "Автор забанен как спам"
-	case "draft":
-		_, err = b.tasks.SendDraft(ctx, id)
-		notice = "Черновик отправлен пользователю"
-	case "work":
-		_, err = b.tasks.SetStatus(ctx, id, domain.StatusInProgress)
-		notice = "Взято в работу"
-	case "done":
-		_, err = b.tasks.SetStatus(ctx, id, domain.StatusDone)
-		notice = "Тикет закрыт"
-	case "fp":
-		_, err = b.tasks.SetStatus(ctx, id, domain.StatusFalsePositive)
-		notice = "Отмечено: не задача"
-	case "reopen":
-		_, err = b.tasks.SetStatus(ctx, id, domain.StatusNew)
-		notice = "Тикет возвращён"
-	default:
-		return domain.ErrInvalidInput
 	}
+	notice, err := b.ticketAction(ctx, t, p[1])
 	if err != nil {
 		return err
 	}

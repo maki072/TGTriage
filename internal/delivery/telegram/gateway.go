@@ -206,6 +206,15 @@ func spamKeyboard(userID int64, banned bool) *telegram.InlineKeyboardMarkup {
 	return kb(row(cb("🚫 Спам — забанить", spamCallback(userID, true))))
 }
 
+func (g *Gateway) SendReminder(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error) {
+	m, err := g.api.SendMessage(ctx, telegram.SendMessageParams{ChatID: groupID, MessageThreadID: topicID, Text: text,
+		ParseMode: "HTML", ReplyMarkup: reminderKeyboard(userID), LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true}})
+	if err != nil {
+		return 0, wrap(groupID, err)
+	}
+	return m.MessageID, nil
+}
+
 func (g *Gateway) SendUserHeader(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error) {
 	m, err := g.api.SendMessage(ctx, telegram.SendMessageParams{ChatID: groupID, MessageThreadID: topicID, Text: text,
 		ParseMode: "HTML", ReplyMarkup: spamKeyboard(userID, false), LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true}})

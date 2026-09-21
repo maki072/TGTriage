@@ -244,7 +244,20 @@ func (r *HelpdeskRepo) SaveCard(ctx context.Context, c domain.HelpdeskCard) erro
 }
 
 func (r *HelpdeskRepo) Cards(ctx context.Context, taskID int64) ([]domain.HelpdeskCard, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT task_id, chat_id, topic_id, message_id FROM hd_cards WHERE task_id = ?`, taskID)
+	return r.cards(ctx, `WHERE task_id = ?`, taskID)
+}
+
+func (r *HelpdeskRepo) CardsInTopic(ctx context.Context, chatID int64, topicID int) ([]domain.HelpdeskCard, error) {
+	return r.cards(ctx, `WHERE chat_id = ? AND topic_id = ?`, chatID, topicID)
+}
+
+func (r *HelpdeskRepo) DeleteCard(ctx context.Context, c domain.HelpdeskCard) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM hd_cards WHERE task_id = ? AND chat_id = ? AND message_id = ?`, c.TaskID, c.ChatID, c.MessageID)
+	return err
+}
+
+func (r *HelpdeskRepo) cards(ctx context.Context, cond string, args ...any) ([]domain.HelpdeskCard, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT task_id, chat_id, topic_id, message_id FROM hd_cards `+cond, args...)
 	if err != nil {
 		return nil, fmt.Errorf("helpdesk cards: %w", err)
 	}

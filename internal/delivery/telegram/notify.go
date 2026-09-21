@@ -28,7 +28,6 @@ func (b *Bot) TaskCreated(ctx context.Context, t *domain.Task) {
 func (b *Bot) TaskUpdated(ctx context.Context, t *domain.Task) {
 	if t.IsHelpdesk() {
 		b.publishTicket(ctx, t)
-		b.topicNotice(ctx, t, fmt.Sprintf("Тикет #%d дополнен новыми сообщениями", t.ID))
 		return
 	}
 	if err := b.renderTask(ctx, nil, t, "<b>Задача дополнена новыми сообщениями</b>", nil); err != nil {

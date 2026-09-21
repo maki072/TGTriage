@@ -427,9 +427,10 @@ ACT['more-menu'] = () => {
   const t = state.task, hu = t.helpdesk_user;
   const items = [];
   if (t.status !== 'in_progress') items.push({ label: 'Взять в работу', icon: 'eye', onSelect: () => setStatus(t, 'in_progress', 'Взято в работу') });
-  items.push({ label: 'Отложить…', icon: 'clock', onSelect: () => openWhen(t, 'snooze') }, { divider: true },
-    { label: 'Напомнить…', icon: 'bell', hint: t.remind_at ? fmtDT(t.remind_at) : '', onSelect: () => openWhen(t, 'remind') },
-    { label: 'Редактировать', icon: 'edit', onSelect: () => openEdit(t) },
+  items.push({ label: 'Отложить…', icon: 'clock', onSelect: () => openWhen(t, 'snooze') }, { divider: true });
+  // a personal reminder is the owner's tool; operators snooze a ticket instead
+  if (isOwner()) items.push({ label: 'Напомнить…', icon: 'bell', hint: t.remind_at ? fmtDT(t.remind_at) : '', onSelect: () => openWhen(t, 'remind') });
+  items.push({ label: 'Редактировать', icon: 'edit', onSelect: () => openEdit(t) },
     { label: 'Объединить с…', icon: 'merge', onSelect: () => openMergePicker(t) });
   if (hu && hu.topic_url) items.push({ label: 'Тема в группе', icon: 'external', onSelect: () => openLink(hu.topic_url) });
   items.push({ divider: true }, { label: 'Не задача', icon: 'ban', danger: true, onSelect: () => setStatus(t, 'false_positive', 'Отмечено как «не задача»') });
@@ -503,7 +504,7 @@ function openWhen(t, mode) {
   const presets = whenPresets(now);
   const remind = mode === 'remind';
   const foot = (t.remind_at && remind ? btn('Убрать', { v: 'ghost', id: 'whenClear' }) : '') + btn('Выберите время', { v: 'primary', id: 'whenGo', disabled: true });
-  const body = (isOpen(t.status) ? segmented('when', [{ value: 'snooze', label: 'Отложить задачу' }, { value: 'remind', label: 'Только напомнить' }], mode) : '') +
+  const body = (isOpen(t.status) && isOwner() ? segmented('when', [{ value: 'snooze', label: 'Отложить задачу' }, { value: 'remind', label: 'Только напомнить' }], mode) : '') +
     `<div class="tr-when__grid">${presets.map((p, i) => `<button type="button" class="tr-chip" data-p="${i}">${esc(p[0])}</button>`).join('')}</div>` +
     `<div class="tr-field"><label class="tr-field__label" for="whenCustom">Другое время</label><input type="datetime-local" class="tr-input" id="whenCustom"></div>`;
   showSheet(remind ? 'Когда напомнить?' : 'Отложить до…', body, foot, root => {
@@ -546,14 +547,14 @@ function openEdit(t) {
     `<div class="tr-field"><label class="tr-field__label" for="editTitle">Заголовок</label><input class="tr-input" id="editTitle" value="${esc(t.title)}"></div>` +
     `<div class="tr-field"><label class="tr-field__label" for="editDescription">Суть</label><textarea class="tr-input" id="editDescription">${esc(t.description)}</textarea></div>` +
     `<div class="tr-row" style="flex-wrap:nowrap;align-items:flex-start"><div class="tr-field" style="flex:1"><label class="tr-field__label" for="editPriority">Срочность</label><select class="tr-input" id="editPriority">${opts(t.priority)}</select></div>` +
-    `<div class="tr-field" style="flex:1"><label class="tr-field__label" for="editImportance">Важность</label><select class="tr-input" id="editImportance">${opts(t.importance || 'medium')}</select></div></div>`,
+    (isOwner() ? `<div class="tr-field" style="flex:1"><label class="tr-field__label" for="editImportance">Важность</label><select class="tr-input" id="editImportance">${opts(t.importance || 'medium')}</select></div>` : '') + `</div>`,
     btn('Сохранить', { v: 'primary', block: true, id: 'editSave' }), root => {
       root.querySelector('#editSave').addEventListener('click', e => {
         const title = root.querySelector('#editTitle').value.trim();
         if (!title) { toast('Введите заголовок', { error: true }); return; }
         withBusy(e.currentTarget, async () => {
           await api('POST', `/api/tasks/${t.id}/edit`, { title, description: root.querySelector('#editDescription').value.trim(),
-            priority: root.querySelector('#editPriority').value, importance: root.querySelector('#editImportance').value });
+            priority: root.querySelector('#editPriority').value, importance: (root.querySelector('#editImportance') || {}).value || '' });
           closeSheet(); toast('Сохранено'); reloadTask(t.id);
         });
       });
