@@ -304,6 +304,13 @@ var migrations = [][]string{
 		`ALTER TABLE bots ADD COLUMN hd_spam_screen INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE bots ADD COLUMN hd_spam_captcha INTEGER NOT NULL DEFAULT 0`,
 	},
+	{
+		// via_bot marks replies the bot sent on the owner's behalf, so style learning only sees what
+		// the owner typed himself (otherwise the bot would learn from its own drafts).
+		`ALTER TABLE messages ADD COLUMN via_bot INTEGER NOT NULL DEFAULT 0`,
+		`UPDATE messages SET via_bot = 1 WHERE outgoing = 1 AND EXISTS (
+			SELECT 1 FROM tasks t WHERE t.chat_id = messages.chat_id AND t.reply_text = messages.text)`,
+	},
 }
 
 // Backup writes a consistent, compacted copy of the database to path (which must not exist).

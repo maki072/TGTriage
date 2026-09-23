@@ -20,6 +20,10 @@ type MessageRepository interface {
 	Pending(ctx context.Context) ([]Message, error)
 	MarkAnalyzed(ctx context.Context, ids []int64, analysisID int64) error
 	DeleteOlderThan(ctx context.Context, before time.Time) (int64, error)
+	// OwnerReplies returns the owner's own substantial replies, newest first (style learning).
+	OwnerReplies(ctx context.Context, q ReplyQuery) ([]Message, error)
+	// TopReplyChats returns the chats with at least minReplies of the owner's replies, busiest first.
+	TopReplyChats(ctx context.Context, minReplies, limit int) ([]ReplyChat, error)
 }
 
 // TaskRepository stores tasks.

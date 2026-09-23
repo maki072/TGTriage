@@ -15,33 +15,35 @@ type MessageRepo struct{ db *sql.DB }
 var _ domain.MessageRepository = (*MessageRepo)(nil)
 
 const messageColumns = `id, connection_id, chat_id, message_id, sender_id, sender_name, sender_username,
-	outgoing, text, sent_at, analyzed, analysis_id, deleted`
+	outgoing, text, sent_at, analyzed, analysis_id, deleted, via_bot`
 
 func scanMessage(sc interface{ Scan(...any) error }) (domain.Message, error) {
 	var (
 		m                           domain.Message
 		outgoing, analyzed, deleted int
+		viaBot                      int
 		sentAt                      int64
 	)
 	err := sc.Scan(&m.ID, &m.ConnectionID, &m.ChatID, &m.MessageID, &m.SenderID, &m.SenderName, &m.SenderUsername,
-		&outgoing, &m.Text, &sentAt, &analyzed, &m.AnalysisID, &deleted)
+		&outgoing, &m.Text, &sentAt, &analyzed, &m.AnalysisID, &deleted, &viaBot)
 	if err != nil {
 		return m, err
 	}
 	m.Outgoing = outgoing == 1
 	m.Analyzed = analyzed == 1
 	m.Deleted = deleted == 1
+	m.ViaBot = viaBot == 1
 	m.SentAt = fromUnix(sentAt)
 	return m, nil
 }
 
 func (r *MessageRepo) Save(ctx context.Context, m *domain.Message) (bool, error) {
 	res, err := r.db.ExecContext(ctx, `INSERT INTO messages
-		(connection_id, chat_id, message_id, sender_id, sender_name, sender_username, outgoing, text, sent_at, analyzed, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		(connection_id, chat_id, message_id, sender_id, sender_name, sender_username, outgoing, text, sent_at, analyzed, created_at, via_bot)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (connection_id, chat_id, message_id) DO NOTHING`,
 		m.ConnectionID, m.ChatID, m.MessageID, m.SenderID, m.SenderName, m.SenderUsername,
-		boolInt(m.Outgoing), m.Text, toUnix(m.SentAt), boolInt(m.Analyzed), time.Now().Unix())
+		boolInt(m.Outgoing), m.Text, toUnix(m.SentAt), boolInt(m.Analyzed), time.Now().Unix(), boolInt(m.ViaBot))
 	if err != nil {
 		return false, fmt.Errorf("insert message: %w", err)
 	}
@@ -157,6 +159,54 @@ func (r *MessageRepo) query(ctx context.Context, q string, args ...any) ([]domai
 			return nil, err
 		}
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ownerReplyFilter keeps what the owner typed himself: no bot-sent replies, no helpdesk operators,
+// and no one-word or huge messages that say little about style.
+const ownerReplyFilter = `outgoing = 1 AND via_bot = 0 AND deleted = 0 AND connection_id NOT LIKE 'helpdesk%'
+	AND length(text) BETWEEN 4 AND 600`
+
+func (r *MessageRepo) OwnerReplies(ctx context.Context, q domain.ReplyQuery) ([]domain.Message, error) {
+	if q.Limit <= 0 {
+		return nil, nil
+	}
+	where, args := ownerReplyFilter, []any{}
+	if q.ConnectionID != "" {
+		where += ` AND connection_id = ?`
+		args = append(args, q.ConnectionID)
+	}
+	if q.ChatID != 0 {
+		where += ` AND chat_id = ?`
+		args = append(args, q.ChatID)
+	}
+	if q.ExceptChatID != 0 {
+		where += ` AND chat_id <> ?`
+		args = append(args, q.ExceptChatID)
+	}
+	if q.BeforeID > 0 {
+		where += ` AND id < ?`
+		args = append(args, q.BeforeID)
+	}
+	args = append(args, q.Limit)
+	return r.query(ctx, `SELECT `+messageColumns+` FROM messages WHERE `+where+` ORDER BY id DESC LIMIT ?`, args...)
+}
+
+func (r *MessageRepo) TopReplyChats(ctx context.Context, minReplies, limit int) ([]domain.ReplyChat, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT connection_id, chat_id, COUNT(*) AS n FROM messages
+		WHERE `+ownerReplyFilter+` GROUP BY connection_id, chat_id HAVING n >= ? ORDER BY n DESC LIMIT ?`, minReplies, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query reply chats: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.ReplyChat
+	for rows.Next() {
+		var c domain.ReplyChat
+		if err := rows.Scan(&c.ConnectionID, &c.ChatID, &c.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

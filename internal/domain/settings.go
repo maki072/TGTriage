@@ -97,10 +97,14 @@ type Settings struct {
 	DebounceSeconds        int
 	DebounceMaxWaitSeconds int
 	ContextMessages        int
-	NoisePrefilter         bool
-	Sensitivity            Sensitivity
-	TriagePaused           bool
-	MarkReadOnWork         bool
+	// StyleLearning: draft replies imitate the owner's own past replies (examples from the same chat plus a
+	// weekly style profile); StyleExamples is how many of that chat's replies the model sees.
+	StyleLearning  bool
+	StyleExamples  int
+	NoisePrefilter bool
+	Sensitivity    Sensitivity
+	TriagePaused   bool
+	MarkReadOnWork bool
 	// AutoCloseOnDone: a short "готово" / "сделал" written by the owner in a Business chat closes the open task of that chat.
 	AutoCloseOnDone bool
 	// NotifyDoneOnClose: when closing a task with "✅ Закрыть", offer to send a "Готово" message

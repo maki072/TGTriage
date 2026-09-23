@@ -103,6 +103,7 @@ func (b *Bot) onBusinessMessage(ctx context.Context, m *telegram.Message) {
 		MessageID:    m.MessageID,
 		Text:         text,
 		SentAt:       time.Unix(m.Date, 0),
+		ViaBot:       m.SenderBusinessBot != nil,
 	}
 	if m.From != nil {
 		dm.SenderID = m.From.ID

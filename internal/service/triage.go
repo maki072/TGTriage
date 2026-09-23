@@ -93,6 +93,7 @@ func (s *TriageService) callTimeout() time.Duration {
 // Start launches workers and re-queues messages that were not analyzed before a restart.
 func (s *TriageService) Start(ctx context.Context) error {
 	s.baseCtx = ctx
+	go s.styleLoop(ctx)
 	for range max(1, s.settings.Get().AnalysisWorkers) {
 		s.wg.Add(1)
 		go s.worker(ctx)
@@ -357,6 +358,13 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 		OpenTasks:       openTasks,
 		Helpdesk:        helpdesk,
 	}
+	if !helpdesk {
+		before := live[0].ID
+		if len(history) > 0 {
+			before = history[0].ID
+		}
+		in.Style = s.styleFor(ctx, st, b.key.connID, b.key.chatID, before)
+	}
 	req := ai.Request{System: ai.SystemPrompt(in), User: ai.UserPrompt(in), Schema: ai.AnalysisSchema()}
 
 	rec := &domain.AnalysisRecord{
@@ -616,6 +624,21 @@ type chainResult struct {
 // Each entry gets its own key and its provider's model. Errors of all tried entries are reported
 // together, so a failure notice shows why every key was skipped.
 func (s *TriageService) completeChain(ctx context.Context, st domain.Settings, req ai.Request, log *slog.Logger) (chainResult, error) {
+	var analysis *domain.Analysis
+	res, err := s.runChain(ctx, st, req, log, func(text string) error {
+		a, err := ai.ParseAnalysis(text)
+		if err == nil {
+			analysis = a
+		}
+		return err
+	})
+	res.Analysis = analysis
+	return res, err
+}
+
+// runChain is completeChain for any answer shape: parse validates (and keeps) the model's text.
+func (s *TriageService) runChain(ctx context.Context, st domain.Settings, req ai.Request, log *slog.Logger,
+	parse func(text string) error) (chainResult, error) {
 	var (
 		res     chainResult
 		errs    []error
@@ -637,13 +660,12 @@ func (s *TriageService) completeChain(ctx context.Context, st domain.Settings, r
 			continue
 		}
 		req.APIKey, req.Model = entry.Key, res.Model
-		resp, analysis, err := s.complete(ctx, p, req, st.AIMaxRetries, i < len(st.AIChain)-1, log)
+		resp, err := s.complete(ctx, p, req, st.AIMaxRetries, i < len(st.AIChain)-1, log, parse)
 		res.Resp = resp
 		if err == nil {
 			if i > 0 {
 				log.Info("AI chain fallback answered", "entry", i+1, "provider", entry.Provider)
 			}
-			res.Analysis = analysis
 			return res, nil
 		}
 		lastErr = err
@@ -661,7 +683,8 @@ func (s *TriageService) completeChain(ctx context.Context, st domain.Settings, r
 // hasFallback, an HTTP error (quota, auth, region block, 5xx) ends the attempts right away: the
 // next chain entry is a better bet than waiting on this one. Network errors are still retried —
 // they usually hit every entry alike (proxy hiccup).
-func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Request, maxRetries int, hasFallback bool, log *slog.Logger) (*ai.Response, *domain.Analysis, error) {
+func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Request, maxRetries int, hasFallback bool, log *slog.Logger,
+	parse func(text string) error) (*ai.Response, error) {
 	var (
 		lastErr  error
 		lastResp *ai.Response
@@ -672,7 +695,7 @@ func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Requ
 			delay := time.Duration(1<<(attempt-1)) * 2 * time.Second
 			select {
 			case <-ctx.Done():
-				return lastResp, nil, errors.Join(lastErr, ctx.Err())
+				return lastResp, errors.Join(lastErr, ctx.Err())
 			case <-time.After(delay):
 			}
 		}
@@ -689,15 +712,14 @@ func (s *TriageService) complete(ctx context.Context, p ai.Provider, req ai.Requ
 			continue
 		}
 		lastResp = resp
-		analysis, err := ai.ParseAnalysis(resp.Text)
-		if err != nil {
+		if err := parse(resp.Text); err != nil {
 			lastErr = fmt.Errorf("invalid model output: %w", err)
 			log.Warn("LLM returned invalid JSON, retrying", "attempt", attempt+1, "err", err)
 			continue
 		}
-		return resp, analysis, nil
+		return resp, nil
 	}
-	return lastResp, nil, lastErr
+	return lastResp, lastErr
 }
 
 func (s *TriageService) merge(t *domain.Task, a *domain.Analysis, live []domain.Message) {

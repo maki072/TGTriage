@@ -386,7 +386,7 @@ func (s *TaskService) sendToContact(ctx context.Context, t *domain.Task, text st
 	}
 	if _, err := s.messages.Save(ctx, &domain.Message{
 		ConnectionID: conn.ID, ChatID: t.ChatID, MessageID: msgID, SenderID: conn.UserID, SenderName: conn.UserName,
-		Outgoing: true, Text: text, SentAt: now, Analyzed: true,
+		Outgoing: true, ViaBot: true, Text: text, SentAt: now, Analyzed: true,
 	}); err != nil {
 		s.log.Warn("store sent reply", "task_id", t.ID, "err", err)
 	}
