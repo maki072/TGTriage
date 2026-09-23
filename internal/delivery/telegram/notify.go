@@ -30,7 +30,7 @@ func (b *Bot) TaskUpdated(ctx context.Context, t *domain.Task) {
 		b.publishTicket(ctx, t)
 		return
 	}
-	if err := b.renderTask(ctx, nil, t, "<b>Задача дополнена новыми сообщениями</b>", nil); err != nil {
+	if err := b.renderTask(ctx, nil, t, "", nil); err != nil {
 		b.log.Error("notify task updated", "task_id", t.ID, "err", err)
 	}
 }

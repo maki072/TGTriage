@@ -156,10 +156,6 @@ func (b *Bot) onInput(ctx context.Context, st dialogState, text string) {
 	case stateSnoozeCustom:
 		err = b.inputSnooze(ctx, st, text)
 	case stateModel:
-		if !service.ValidModelName(text) {
-			err = fmt.Errorf("%w: некорректный идентификатор модели", domain.ErrInvalidInput)
-			break
-		}
 		if err = b.setModel(ctx, st.Provider, text); err == nil {
 			b.states.clear()
 			err = b.showSettings(ctx, nil)

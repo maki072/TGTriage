@@ -216,6 +216,9 @@ func (b *Bot) setModel(ctx context.Context, provider, model string) error {
 	if !domainProvider(provider) {
 		return domain.ErrInvalidInput
 	}
+	if err := service.CheckModel(provider, model); err != nil {
+		return fmt.Errorf("%w: %s", domain.ErrInvalidInput, err)
+	}
 	_, err := b.settings.Update(ctx, func(s *domain.Settings) { s.Provider(provider).Model = model })
 	return err
 }

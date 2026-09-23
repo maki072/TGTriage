@@ -253,6 +253,12 @@ func (s *Settings) Provider(name string) *ProviderSettings {
 	}
 }
 
+// IsFreeModel reports whether an OpenRouter model costs nothing: the "openrouter/free" router or an
+// id with the ":free" suffix. Anything else is billed against the account balance.
+func IsFreeModel(model string) bool {
+	return model == "openrouter/free" || strings.HasSuffix(model, ":free")
+}
+
 // ModelFor returns configured model for provider.
 func (s Settings) ModelFor(provider string) string { return s.Provider(provider).Model }
 
