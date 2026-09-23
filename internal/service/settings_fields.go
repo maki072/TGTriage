@@ -219,25 +219,14 @@ func listField(key, env, group, label, desc, def string, check func(string) erro
 
 // ---------- validators ----------
 
-// CheckModel validates a model id for provider; OpenRouter is limited to free models so nothing is
-// billed to the account balance by accident.
-func CheckModel(provider, v string) error {
+func checkModel(v string) (string, error) {
 	if !ValidModelName(v) {
-		return fmt.Errorf("некорректный идентификатор модели")
+		return "", fmt.Errorf("некорректный идентификатор модели")
 	}
-	if provider == domain.ProviderOpenRouter && !domain.IsFreeModel(v) {
-		return fmt.Errorf("платные модели OpenRouter запрещены: нужен openrouter/free или id с суффиксом :free")
-	}
-	return nil
+	return v, nil
 }
 
-func modelChecker(provider string) func(string) (string, error) {
-	return func(v string) (string, error) { return v, CheckModel(provider, v) }
-}
-
-func modelItemChecker(provider string) func(string) error {
-	return func(v string) error { return CheckModel(provider, v) }
-}
+func checkModelItem(v string) error { _, err := checkModel(v); return err }
 
 func checkURL(v string) (string, error) {
 	u, err := url.Parse(v)
@@ -319,14 +308,14 @@ var (
 
 func providerFields(p, title, envPrefix, model, presets, maxTokens, maxTokensMax, baseURL string) []SettingField {
 	ps := func(s *domain.Settings) *domain.ProviderSettings { return s.Provider(p) }
-	mf := stringField("ai."+p+"_model", envPrefix+"_MODEL", "ai", "Модель "+title, "", model, KindModel, modelChecker(p),
+	mf := stringField("ai."+p+"_model", envPrefix+"_MODEL", "ai", "Модель "+title, "", model, KindModel, checkModel,
 		func(s *domain.Settings) *string { return &ps(s).Model })
 	mf.Provider = p
 	maxT, _ := strconv.Atoi(maxTokensMax)
 	return []SettingField{
 		mf,
 		listField("ai."+p+"_presets", envPrefix+"_MODEL_PRESETS", "ai", "Пресеты моделей "+title,
-			"Подсказки при выборе модели", presets, modelItemChecker(p), func(s *domain.Settings) *[]string { return &ps(s).Presets }),
+			"Подсказки при выборе модели", presets, checkModelItem, func(s *domain.Settings) *[]string { return &ps(s).Presets }),
 		intField("ai."+p+"_max_tokens", envPrefix+"_MAX_TOKENS", "ai", "Max tokens "+title, "", maxTokens, 1024, maxT,
 			func(s *domain.Settings) *int { return &ps(s).MaxTokens }),
 		stringField("ai."+p+"_base_url", baseURLEnv(p), "ai", "API URL "+title, "", baseURL, KindString, checkURL,

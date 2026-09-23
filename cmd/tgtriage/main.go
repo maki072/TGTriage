@@ -123,7 +123,7 @@ func registerProviders(registry *ai.Registry, st domain.Settings, socks5 string)
 	registry.Register(openaicompat.New(openaicompat.Config{
 		Name: domain.ProviderOpenRouter, BaseURL: st.OpenRouter.BaseURL,
 		MaxTokens: st.OpenRouter.MaxTokens, Temperature: 0.2, Timeout: timeout, Socks5Addr: socks5,
-		Headers: headers, FreeOnly: true,
+		Headers: headers,
 	}))
 }
 

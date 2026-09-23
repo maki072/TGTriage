@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"tgtriage/internal/ai"
-	"tgtriage/internal/domain"
 	"tgtriage/internal/netutil"
 )
 
@@ -28,7 +27,6 @@ type Config struct {
 	Timeout     time.Duration     // default 90s
 	Socks5Addr  string            // e.g. "127.0.0.1:1080"; empty = dial directly
 	Headers     map[string]string // extra request headers some gateways want (e.g. OpenRouter attribution)
-	FreeOnly    bool              // refuse models that are not free (OpenRouter bills those to the balance)
 }
 
 // Provider implements ai.Provider for any OpenAI-compatible Chat Completions endpoint.
@@ -101,9 +99,6 @@ type errorResponse struct {
 func (p *Provider) Complete(ctx context.Context, req ai.Request) (*ai.Response, error) {
 	if req.APIKey == "" {
 		return nil, &ai.Error{Provider: p.Name(), Message: "API key is not set"}
-	}
-	if p.cfg.FreeOnly && !domain.IsFreeModel(req.Model) {
-		return nil, &ai.Error{Provider: p.Name(), Message: fmt.Sprintf("model %q is not free (only openrouter/free or :free models are allowed)", req.Model)}
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
