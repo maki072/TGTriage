@@ -45,6 +45,8 @@ func (b *Bot) onPrivateMessage(ctx context.Context, m *telegram.Message) {
 	}
 	ctx = service.WithActor(ctx, service.Actor{ID: m.From.ID, Name: m.From.FullName()})
 	switch {
+	case m.From.ID == b.cfg.OwnerID && b.additional():
+		b.onAdditionalOwnerMessage(ctx, m)
 	case m.From.ID == b.cfg.OwnerID:
 		b.onOwnerMessage(ctx, m)
 	case b.helpdesk.Active() && b.helpdesk.IsOperator(ctx, m.From.ID):
@@ -218,4 +220,29 @@ func (b *Bot) inputSnooze(ctx context.Context, st dialogState, text string) erro
 	}
 	b.states.clear()
 	return b.renderTask(ctx, nil, t, "<b>Отложено до "+b.fmtTime(until)+"</b>", nil)
+}
+
+const additionalOwnerHelp = `<b>Бот хелпдеска</b>
+
+Меню задач и личный триаж работают только в главном боте. Этот бот обслуживает свою группу: настройки — в веб-панели, раздел «Боты».
+
+• чтобы узнать ID группы или подключить её, отправьте в группе /id
+• перешлите сюда сообщение пользователя — создастся тикет`
+
+// onAdditionalOwnerMessage: the owner's private chat with a client-organization bot. No task menu —
+// only what the helpdesk needs (ticket links, forwarding a user's message into a ticket).
+func (b *Bot) onAdditionalOwnerMessage(ctx context.Context, m *telegram.Message) {
+	if m.ForwardOrigin != nil {
+		if !b.forwardToHelpdesk(ctx, m) {
+			_ = b.sendTo(ctx, m.Chat.ID, "Не нашёл пользователя хелпдеска, от которого это сообщение.", nil)
+		}
+		return
+	}
+	if cmd, arg := parseCommand(m.Text); cmd == "/start" && strings.HasPrefix(arg, "t") {
+		if id, err := strconv.ParseInt(arg[1:], 10, 64); err == nil {
+			b.sendTicketLink(ctx, m.Chat.ID, id)
+			return
+		}
+	}
+	_ = b.sendTo(ctx, m.Chat.ID, additionalOwnerHelp, b.webAppKeyboard("Открыть веб-панель", ""))
 }

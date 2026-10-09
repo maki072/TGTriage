@@ -63,6 +63,13 @@ var ownerCommands = []telegram.BotCommand{
 	{Command: "settings", Description: "Настройки"},
 	{Command: "cancel", Description: "Отменить ввод"},
 	{Command: "help", Description: "Справка"},
+	{Command: "id", Description: "ID этого чата"},
+}
+
+// An additional bot has no triage menu: the owner only needs /start and /id (a group's id).
+var additionalOwnerCommands = []telegram.BotCommand{
+	{Command: "start", Description: "Начать"},
+	{Command: "id", Description: "ID этого чата"},
 }
 
 // Everyone else — support desk users — only needs /start; owner commands are scoped to the owner's chat.
@@ -73,13 +80,21 @@ func (b *Bot) Run(ctx context.Context) {
 	if err := b.api.SetMyCommands(ctx, publicCommands); err != nil {
 		b.log.Warn("setMyCommands failed", "err", err)
 	}
-	if err := b.api.SetMyCommandsForChat(ctx, b.cfg.OwnerID, ownerCommands); err != nil {
+	cmds := ownerCommands
+	if b.additional() {
+		cmds = additionalOwnerCommands
+	}
+	if err := b.api.SetMyCommandsForChat(ctx, b.cfg.OwnerID, cmds); err != nil {
 		b.log.Warn("setMyCommands for owner failed", "err", err)
 	}
 	b.EnsureMenuButton(ctx)
 	go b.EnsureTicketsMenu(ctx)
 	b.api.Poll(ctx, b.handle)
 }
+
+// additional reports whether this is a client-organization bot: it serves only its own helpdesk —
+// personal triage (Business messages, the owner's task menu and settings) lives in the main bot.
+func (b *Bot) additional() bool { return b.cfg.BotDBID != 0 }
 
 // EnsureMenuButton points the persistent menu button (next to the message box) at the Mini App —
 // but only in the owner's own private chat: support-seekers writing to the bot have no business
@@ -109,6 +124,10 @@ func (b *Bot) handle(ctx context.Context, u telegram.Update) {
 	hctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
+	if b.additional() && (u.BusinessConnection != nil || u.BusinessMessage != nil ||
+		u.EditedBusinessMessage != nil || u.DeletedBusinessMessages != nil) {
+		return
+	}
 	switch {
 	case u.BusinessConnection != nil:
 		b.onBusinessConnection(hctx, u.BusinessConnection)
@@ -130,10 +149,13 @@ func (b *Bot) handle(ctx context.Context, u telegram.Update) {
 }
 
 func (b *Bot) onMessage(ctx context.Context, m *telegram.Message) {
+	if b.onIDCommand(ctx, m) {
+		return
+	}
 	switch {
 	case m.MigrateToChatID != 0:
 		// enabling topics turns a basic group into a supergroup with a new id
-		b.offerHelpdeskGroup(ctx, m.MigrateToChatID, m.From)
+		b.offerHelpdeskGroup(ctx, m.MigrateToChatID, m.From, 0)
 	case m.Chat.Type == "private":
 		b.onPrivateMessage(ctx, m)
 	case m.Chat.ID != 0 && m.Chat.ID == b.helpdesk.GroupID():

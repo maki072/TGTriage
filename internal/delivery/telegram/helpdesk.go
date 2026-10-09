@@ -243,15 +243,16 @@ func (b *Bot) onMyChatMember(ctx context.Context, u *telegram.ChatMemberUpdated)
 		}
 	case u.Chat.Type == "group" || u.Chat.Type == "supergroup":
 		if u.NewChatMember.InChat() && u.NewChatMember.Status != u.OldChatMember.Status {
-			b.offerHelpdeskGroup(ctx, u.Chat.ID, &u.From)
+			b.offerHelpdeskGroup(ctx, u.Chat.ID, &u.From, 0)
 		}
 	}
 }
 
 // offerHelpdeskGroup tells the owner the id of a group the bot was added to (or promoted in) and offers
 // to use it for the helpdesk. Only the owner can press the button, so a stranger adding the bot to
-// some group changes nothing.
-func (b *Bot) offerHelpdeskGroup(ctx context.Context, chatID int64, by *telegram.User) {
+// some group changes nothing. An additional bot with no group yet (and a ready forum group, added by
+// the owner) takes the group on its own. dest is the chat to answer in (0 = the owner's private chat).
+func (b *Bot) offerHelpdeskGroup(ctx context.Context, chatID int64, by *telegram.User, dest int64) {
 	chat := telegram.Chat{ID: chatID}
 	if ch, err := b.api.GetChat(ctx, chatID); err == nil {
 		chat = *ch
@@ -263,35 +264,95 @@ func (b *Bot) offerHelpdeskGroup(ctx context.Context, chatID int64, by *telegram
 	}
 	if chat.Type == "group" {
 		sb.WriteString("\n\nЭто обычная группа. Включите в ней «Темы» — Telegram превратит её в супергруппу с новым ID, и я пришлю его сюда.")
-		_ = b.sendText(ctx, sb.String(), nil)
+		b.sendOwnerOrChat(ctx, chat.ID, dest, sb.String(), nil)
 		return
 	}
-	if chat.ID == b.helpdesk.ConfiguredGroupID() {
+	configured := b.helpdesk.ConfiguredGroupID()
+	if chat.ID == configured {
+		if dest != 0 {
+			sb.WriteString("\n\nЭта группа уже подключена к хелпдеску.")
+			b.sendOwnerOrChat(ctx, chat.ID, dest, sb.String(), nil)
+		}
+		return
+	}
+	admin := false
+	if m, err := b.api.GetChatMember(ctx, chat.ID, b.cfg.BotID); err == nil {
+		admin = m.Status == "administrator"
+	}
+	if b.additional() && configured == 0 && chat.IsForum && admin && by != nil && by.ID == b.cfg.OwnerID {
+		report, err := b.applyHelpdeskGroup(ctx, chat.ID)
+		if err != nil {
+			b.log.Warn("auto-use helpdesk group", "chat_id", chat.ID, "err", err)
+			report = "Не удалось включить хелпдеск: " + esc(humanError(err))
+		}
+		b.sendOwnerOrChat(ctx, chat.ID, dest, report, b.webAppKeyboard("Настройки хелпдеска", ""))
 		return
 	}
 	if !chat.IsForum {
 		sb.WriteString("\n\nВ группе выключены «Темы» — включите их в настройках группы.")
 	}
-	if m, err := b.api.GetChatMember(ctx, chat.ID, b.cfg.BotID); err == nil && m.Status != "administrator" {
+	if !admin {
 		sb.WriteString("\nБот не администратор — назначьте его админом с правами «Управление темами», «Закреплять» и «Удалять сообщения».")
 	}
+	if b.additional() && configured == 0 {
+		sb.WriteString("\n\nКогда всё готово, отправьте в группе /id — я подключу её сам.")
+	}
 	markup := kb(row(cb("Использовать для хелпдеска", fmt.Sprintf("hg:%d", chat.ID))))
-	if err := b.sendText(ctx, sb.String(), markup); err != nil {
-		b.log.Warn("offer helpdesk group", "chat_id", chat.ID, "err", err)
+	b.sendOwnerOrChat(ctx, chat.ID, dest, sb.String(), markup)
+}
+
+// sendOwnerOrChat delivers a notice to dest (default: the owner's private chat). A bot cannot write
+// first to a user who never pressed Start — then the notice goes to the group itself, with a hint.
+func (b *Bot) sendOwnerOrChat(ctx context.Context, chatID, dest int64, text string, markup *telegram.InlineKeyboardMarkup) {
+	if dest == 0 {
+		dest = b.cfg.OwnerID
+	}
+	err := b.sendTo(ctx, dest, text, markup)
+	if err == nil {
+		return
+	}
+	b.log.Warn("offer helpdesk group", "chat_id", chatID, "err", err)
+	if dest == chatID {
+		return
+	}
+	hint := "\n\n<i>Не могу написать владельцу в личку — откройте этого бота и нажмите Start.</i>"
+	if err := b.sendTo(ctx, chatID, text+hint, markup); err != nil {
+		b.log.Warn("offer helpdesk group in the group", "chat_id", chatID, "err", err)
 	}
 }
 
-// useHelpdeskGroup sets the group for the helpdesk, enables it and reports the group check.
-func (b *Bot) useHelpdeskGroup(ctx context.Context, ref *msgRef, groupID int64, answer func(string, bool)) error {
+// onIDCommand answers the owner's /id: the id of the current chat. In a group it also offers (or,
+// for an additional bot, performs) connecting it as the helpdesk group. Reports whether it
+// handled the message, so the command never reaches the helpdesk relay as an operator reply.
+func (b *Bot) onIDCommand(ctx context.Context, m *telegram.Message) bool {
+	if m.From == nil || m.From.ID != b.cfg.OwnerID || m.ForwardOrigin != nil {
+		return false
+	}
+	cmd, _ := parseCommand(m.Text)
+	if cmd != "/id" {
+		return false
+	}
+	if _, name, ok := strings.Cut(strings.Fields(m.Text)[0], "@"); ok && !strings.EqualFold(name, b.cfg.BotUsername) {
+		return false // addressed to another bot in the same group
+	}
+	if m.Chat.Type == "private" {
+		_ = b.sendTo(ctx, m.Chat.ID, fmt.Sprintf("ID этого чата: <code>%d</code>", m.Chat.ID), nil)
+		return true
+	}
+	b.offerHelpdeskGroup(ctx, m.Chat.ID, m.From, m.Chat.ID)
+	return true
+}
+
+// applyHelpdeskGroup sets the group for the helpdesk, enables it and returns the group-check report.
+func (b *Bot) applyHelpdeskGroup(ctx context.Context, groupID int64) (string, error) {
 	if groupID >= 0 {
-		return domain.ErrInvalidInput
+		return "", domain.ErrInvalidInput
 	}
 	if err := b.helpdesk.UpdateConfig(ctx, func(h *domain.HelpdeskSettings) {
 		h.GroupID, h.Enabled = groupID, true
 	}); err != nil {
-		return err
+		return "", err
 	}
-	answer("Хелпдеск включён", false)
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "<b>Хелпдеск включён</b>\nГруппа: <code>%d</code>\n\n", groupID)
 	check, err := b.helpdesk.CheckGroup(ctx)
@@ -317,8 +378,17 @@ func (b *Bot) useHelpdeskGroup(ctx context.Context, ref *msgRef, groupID int64, 
 			sb.WriteString("\nИсправьте отмеченное ✗ — без тем и права «Управление темами» хелпдеск не работает.")
 		}
 	}
-	markup := b.webAppKeyboard("Настройки хелпдеска", "")
-	return b.render(ctx, ref, sb.String(), markup)
+	return sb.String(), nil
+}
+
+// useHelpdeskGroup is the "Использовать для хелпдеска" button.
+func (b *Bot) useHelpdeskGroup(ctx context.Context, ref *msgRef, groupID int64, answer func(string, bool)) error {
+	text, err := b.applyHelpdeskGroup(ctx, groupID)
+	if err != nil {
+		return err
+	}
+	answer("Хелпдеск включён", false)
+	return b.render(ctx, ref, text, b.webAppKeyboard("Настройки хелпдеска", ""))
 }
 
 // ---------- ticket cards ----------

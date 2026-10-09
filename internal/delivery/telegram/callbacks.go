@@ -54,6 +54,10 @@ func (b *Bot) onCallback(ctx context.Context, q *telegram.CallbackQuery) {
 		answer("Нет доступа", true)
 		return
 	}
+	if b.additional() && parts[0] != "hg" && parts[0] != "noop" {
+		answer("Меню задач доступно только в главном боте", true) // buttons on messages from before the menu was removed
+		return
+	}
 	var ref *msgRef
 	if q.Message != nil && q.Message.Date != 0 {
 		ref = &msgRef{ChatID: q.Message.Chat.ID, MessageID: q.Message.MessageID}
