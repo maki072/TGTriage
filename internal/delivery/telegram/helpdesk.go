@@ -150,6 +150,14 @@ const anonymousAdminID = 1087968824
 
 func (b *Bot) onGroupMessage(ctx context.Context, m *telegram.Message) {
 	group := m.Chat.ID
+	if m.IsService() && b.helpdesk.Config().DeleteService {
+		// after the handling below (closing and reopening a topic still has to sync)
+		defer func() {
+			if err := b.api.DeleteMessage(ctx, group, m.MessageID); err != nil {
+				b.log.Debug("delete service message", "err", err)
+			}
+		}()
+	}
 	switch {
 	case m.ForumTopicClosed != nil:
 		if err := b.helpdesk.OnTopicState(ctx, group, m.MessageThreadID, true); err != nil {

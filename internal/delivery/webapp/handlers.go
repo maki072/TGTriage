@@ -767,6 +767,7 @@ type botHelpdeskPatch struct {
 	ReminderMinutes  *int    `json:"reminder_minutes"`
 	SpamScreen       *bool   `json:"spam_screen"`
 	SpamCaptcha      *bool   `json:"spam_captcha"`
+	DeleteService    *bool   `json:"delete_service"`
 }
 
 func (s *Server) handleBotPatch(w http.ResponseWriter, r *http.Request) {
@@ -837,6 +838,7 @@ func (s *Server) handleBotPatch(w http.ResponseWriter, r *http.Request) {
 			setI(&hd.ReminderMinutes, h.ReminderMinutes)
 			setB(&hd.SpamScreen, h.SpamScreen)
 			setB(&hd.SpamCaptcha, h.SpamCaptcha)
+			setB(&hd.DeleteService, h.DeleteService)
 		}
 	})
 	if err != nil {

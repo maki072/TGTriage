@@ -311,6 +311,9 @@ var migrations = [][]string{
 		`UPDATE messages SET via_bot = 1 WHERE outgoing = 1 AND EXISTS (
 			SELECT 1 FROM tasks t WHERE t.chat_id = messages.chat_id AND t.reply_text = messages.text)`,
 	},
+	{
+		`ALTER TABLE bots ADD COLUMN hd_delete_service INTEGER NOT NULL DEFAULT 1`,
+	},
 }
 
 // Backup writes a consistent, compacted copy of the database to path (which must not exist).

@@ -393,6 +393,9 @@ func buildFields() []SettingField {
 		boolField("helpdesk.spam_captcha", "", "helpdesk", "Капча для новых пользователей",
 			"Новый пользователь должен нажать «Я не бот», прежде чем его сообщение дойдёт до операторов", "false",
 			func(s *domain.Settings) *bool { return &hd(s).SpamCaptcha }),
+		boolField("helpdesk.delete_service", "", "helpdesk", "Удалять служебные сообщения в группе",
+			"Бот сам убирает «вступил», «вышел», «сменил название», «закрыл тему», «закрепил сообщение» — новые операторы не увидят их в General и темах. Нужно право «Удалять сообщения»", "true",
+			func(s *domain.Settings) *bool { return &hd(s).DeleteService }),
 	)
 
 	// AI

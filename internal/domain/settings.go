@@ -149,6 +149,9 @@ type HelpdeskSettings struct {
 	SpamScreen bool
 	// SpamCaptcha makes every new user press "I am not a bot" before their first message is relayed.
 	SpamCaptcha bool
+	// DeleteService removes Telegram's service messages from the group (joined, left, renamed, topic closed,
+	// pinned...) so new operators do not read them in General and topics.
+	DeleteService bool
 }
 
 // DefaultHelpdeskSettings mirrors the built-in defaults of the "helpdesk.*" setting fields
@@ -166,6 +169,7 @@ func DefaultHelpdeskSettings() HelpdeskSettings {
 		OffHoursText:    "Сейчас нерабочее время. Сообщение получено, ответим в рабочие часы: {hours}.",
 		ReminderMinutes: 15,
 		SpamScreen:      true,
+		DeleteService:   true,
 	}
 }
 

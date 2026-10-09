@@ -282,6 +282,7 @@ type BotHelpdesk struct {
 	ReminderMinutes  int    `json:"reminder_minutes"`
 	SpamScreen       bool   `json:"spam_screen"`
 	SpamCaptcha      bool   `json:"spam_captcha"`
+	DeleteService    bool   `json:"delete_service"`
 }
 
 func toBotDTO(b domain.Bot) Bot {
@@ -294,7 +295,7 @@ func toBotDTO(b domain.Bot) Bot {
 			GreetingEnabled: h.GreetingEnabled, GreetingText: h.GreetingText,
 			AutoReplyEnabled: h.AutoReplyEnabled, AutoReplyText: h.AutoReplyText,
 			HoursEnabled: h.HoursEnabled, HoursStart: h.HoursStart, HoursEnd: h.HoursEnd, HoursDays: h.HoursDays,
-			OffHoursText: h.OffHoursText, ReminderMinutes: h.ReminderMinutes, SpamScreen: h.SpamScreen, SpamCaptcha: h.SpamCaptcha,
+			OffHoursText: h.OffHoursText, ReminderMinutes: h.ReminderMinutes, SpamScreen: h.SpamScreen, SpamCaptcha: h.SpamCaptcha, DeleteService: h.DeleteService,
 		},
 	}
 }

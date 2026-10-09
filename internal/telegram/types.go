@@ -206,6 +206,14 @@ type Message struct {
 	ForumTopicClosed     *struct{}       `json:"forum_topic_closed,omitempty"`
 	ForumTopicReopened   *struct{}       `json:"forum_topic_reopened,omitempty"`
 	ForumTopicEdited     *struct{}       `json:"forum_topic_edited,omitempty"`
+	NewChatMembers       []User          `json:"new_chat_members,omitempty"`
+	LeftChatMember       *User           `json:"left_chat_member,omitempty"`
+	NewChatTitle         string          `json:"new_chat_title,omitempty"`
+	NewChatPhoto         []Media         `json:"new_chat_photo,omitempty"`
+	DeleteChatPhoto      bool            `json:"delete_chat_photo,omitempty"`
+	PinnedMessage        json.RawMessage `json:"pinned_message,omitempty"`
+	GeneralTopicHidden   *struct{}       `json:"general_forum_topic_hidden,omitempty"`
+	GeneralTopicUnhidden *struct{}       `json:"general_forum_topic_unhidden,omitempty"`
 	MigrateToChatID      int64           `json:"migrate_to_chat_id,omitempty"` // a group became a supergroup
 	Photo                []Media         `json:"photo,omitempty"`
 	Video                *Media          `json:"video,omitempty"`
@@ -373,4 +381,14 @@ type MenuButton struct {
 	Type   string      `json:"type"` // "commands" | "web_app" | "default"
 	Text   string      `json:"text,omitempty"`
 	WebApp *WebAppInfo `json:"web_app,omitempty"`
+}
+
+// IsService reports whether m is one of Telegram's own service messages that only clutters a
+// group: members joining or leaving, a new title or photo, pins, a topic closed, reopened or
+// renamed. forum_topic_created is deliberately not one — it is the root of a topic.
+func (m *Message) IsService() bool {
+	return len(m.NewChatMembers) > 0 || m.LeftChatMember != nil || m.NewChatTitle != "" ||
+		len(m.NewChatPhoto) > 0 || m.DeleteChatPhoto || len(m.PinnedMessage) > 0 ||
+		m.ForumTopicClosed != nil || m.ForumTopicReopened != nil || m.ForumTopicEdited != nil ||
+		m.GeneralTopicHidden != nil || m.GeneralTopicUnhidden != nil
 }
