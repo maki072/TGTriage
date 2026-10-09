@@ -15,6 +15,7 @@ type Update struct {
 	EditedMessage           *Message                 `json:"edited_message,omitempty"`
 	CallbackQuery           *CallbackQuery           `json:"callback_query,omitempty"`
 	MyChatMember            *ChatMemberUpdated       `json:"my_chat_member,omitempty"`
+	ChatMember              *ChatMemberUpdated       `json:"chat_member,omitempty"`
 	BusinessConnection      *BusinessConnection      `json:"business_connection,omitempty"`
 	BusinessMessage         *Message                 `json:"business_message,omitempty"`
 	EditedBusinessMessage   *Message                 `json:"edited_business_message,omitempty"`
@@ -23,7 +24,7 @@ type Update struct {
 
 // AllowedUpdates is the list of update types the service subscribes to.
 var AllowedUpdates = []string{
-	"message", "edited_message", "callback_query", "my_chat_member",
+	"message", "edited_message", "callback_query", "my_chat_member", "chat_member",
 	"business_connection", "business_message", "edited_business_message", "deleted_business_messages",
 }
 
@@ -48,7 +49,8 @@ func (m *ChatMember) InChat() bool {
 	return false
 }
 
-// ChatMemberUpdated reports a change of the bot's own membership (my_chat_member).
+// ChatMemberUpdated reports a change of a member of a chat: the bot itself (my_chat_member) or, for
+// a chat where the bot is an administrator, anyone else (chat_member).
 type ChatMemberUpdated struct {
 	Chat          Chat       `json:"chat"`
 	From          User       `json:"from"`

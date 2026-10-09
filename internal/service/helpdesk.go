@@ -987,7 +987,7 @@ func (s *HelpdeskService) IsOperator(ctx context.Context, userID int64) bool {
 		return e.ok
 	}
 	member, err := s.transport.IsChatMember(ctx, group, userID)
-	ttl := 5 * time.Minute
+	ttl := time.Minute // chat_member updates refresh this at once; the TTL only covers missed ones
 	if err != nil {
 		s.log.Debug("check operator membership", "user_id", userID, "err", err)
 		member, ttl = false, 30*time.Second
@@ -998,6 +998,17 @@ func (s *HelpdeskService) IsOperator(ctx context.Context, userID int64) bool {
 	s.members[userID] = memberEntry{groupID: group, ok: member, until: now.Add(ttl)}
 	s.mu.Unlock()
 	return member
+}
+
+// OnMemberChanged applies a chat_member update at once, so someone removed from the helpdesk group
+// stops being an operator without waiting for the membership cache to expire.
+func (s *HelpdeskService) OnMemberChanged(chatID, userID int64, inChat bool) {
+	if chatID == 0 || chatID != s.GroupID() {
+		return
+	}
+	s.mu.Lock()
+	s.members[userID] = memberEntry{groupID: chatID, ok: inChat, until: time.Now().Add(time.Minute)}
+	s.mu.Unlock()
 }
 
 // CheckGroup verifies the configured group (forum mode, bot rights).
