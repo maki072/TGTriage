@@ -1263,3 +1263,20 @@ func (s *HelpdeskService) ClearAwaiting(ctx context.Context, userID int64) error
 	u.AwaitingSince, u.RemindedAt = nil, nil
 	return s.repo.SaveUser(ctx, u)
 }
+
+// OnOperatorReaction treats an operator's reaction under the user's latest message as an answer
+// ("thanks" → 👍): the user stops waiting. Reactions under older messages change nothing.
+func (s *HelpdeskService) OnOperatorReaction(ctx context.Context, groupID int64, messageID int, operatorID int64) error {
+	if s.GroupID() != groupID || !s.IsOperator(ctx, operatorID) {
+		return nil
+	}
+	m, err := s.repo.MessageByGroupMsg(ctx, s.botDBID, groupID, messageID)
+	if err != nil || m.Direction != domain.HelpdeskIn {
+		return nil
+	}
+	u, err := s.repo.GetUser(ctx, s.botDBID, m.UserID)
+	if err != nil || u.AwaitingSince == nil || (u.LastMessageAt != nil && m.CreatedAt.Before(u.LastMessageAt.Add(-2*time.Second))) {
+		return nil
+	}
+	return s.ClearAwaiting(ctx, m.UserID)
+}

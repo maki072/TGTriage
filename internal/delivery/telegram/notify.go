@@ -39,6 +39,22 @@ func (b *Bot) TaskUpdated(ctx context.Context, t *domain.Task) {
 func (b *Bot) TaskChanged(ctx context.Context, t *domain.Task) {
 	if t.IsHelpdesk() {
 		b.publishTicket(ctx, t)
+		if t.Status == domain.StatusDone && t.HasChat() {
+			b.stopWaitingIfSolved(ctx, t.ChatID)
+		}
+	}
+}
+
+// stopWaitingIfSolved ends the "user is waiting" state (and its reminders) once the user has no open
+// ticket left: the operators closed the matter.
+func (b *Bot) stopWaitingIfSolved(ctx context.Context, userID int64) {
+	open, _, err := b.tasks.List(ctx, domain.TaskFilter{ConnectionID: b.botConn(), ChatID: userID,
+		Statuses: []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed}, Limit: 1})
+	if err != nil || len(open) > 0 {
+		return
+	}
+	if err := b.helpdesk.ClearAwaiting(ctx, userID); err != nil {
+		b.log.Debug("clear waiting after close", "user_id", userID, "err", err)
 	}
 }
 

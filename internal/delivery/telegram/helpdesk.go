@@ -807,3 +807,13 @@ func (b *Bot) SpamSuspected(ctx context.Context, userID int64, conf float64, rea
 		b.log.Debug("post spam warning", "err", err)
 	}
 }
+
+// onReaction: an operator's reaction under the user's last message in a topic counts as an answer.
+func (b *Bot) onReaction(ctx context.Context, r *telegram.MessageReactionUpdated) {
+	if r.User == nil || r.User.IsBot || len(r.NewReaction) == 0 || r.Chat.ID != b.helpdesk.GroupID() {
+		return
+	}
+	if err := b.helpdesk.OnOperatorReaction(ctx, r.Chat.ID, r.MessageID, r.User.ID); err != nil {
+		b.log.Warn("operator reaction", "err", err)
+	}
+}

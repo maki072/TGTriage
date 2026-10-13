@@ -143,6 +143,8 @@ func (b *Bot) handle(ctx context.Context, u telegram.Update) {
 		b.onMyChatMember(hctx, u.MyChatMember)
 	case u.ChatMember != nil:
 		b.helpdesk.OnMemberChanged(u.ChatMember.Chat.ID, u.ChatMember.NewChatMember.User.ID, u.ChatMember.NewChatMember.InChat())
+	case u.MessageReaction != nil:
+		b.onReaction(hctx, u.MessageReaction)
 	case u.EditedMessage != nil:
 		b.onEditedMessage(hctx, u.EditedMessage)
 	case u.Message != nil:

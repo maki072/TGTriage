@@ -20,12 +20,14 @@ type Update struct {
 	BusinessMessage         *Message                 `json:"business_message,omitempty"`
 	EditedBusinessMessage   *Message                 `json:"edited_business_message,omitempty"`
 	DeletedBusinessMessages *BusinessMessagesDeleted `json:"deleted_business_messages,omitempty"`
+	MessageReaction         *MessageReactionUpdated  `json:"message_reaction,omitempty"`
 }
 
 // AllowedUpdates is the list of update types the service subscribes to.
 var AllowedUpdates = []string{
 	"message", "edited_message", "callback_query", "my_chat_member", "chat_member",
 	"business_connection", "business_message", "edited_business_message", "deleted_business_messages",
+	"message_reaction",
 }
 
 // ChatMember is a member of a chat with the rights relevant to the service.
@@ -391,4 +393,13 @@ func (m *Message) IsService() bool {
 		len(m.NewChatPhoto) > 0 || m.DeleteChatPhoto || len(m.PinnedMessage) > 0 ||
 		m.ForumTopicClosed != nil || m.ForumTopicReopened != nil || m.ForumTopicEdited != nil ||
 		m.GeneralTopicHidden != nil || m.GeneralTopicUnhidden != nil
+}
+
+// MessageReactionUpdated reports a change of the reactions a user (or an anonymous admin, Actor chat)
+// put under a message. Only the fact that some reaction is set matters to the service.
+type MessageReactionUpdated struct {
+	Chat        Chat              `json:"chat"`
+	MessageID   int               `json:"message_id"`
+	User        *User             `json:"user,omitempty"`
+	NewReaction []json.RawMessage `json:"new_reaction"`
 }
