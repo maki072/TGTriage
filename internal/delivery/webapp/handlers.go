@@ -919,6 +919,30 @@ func (s *Server) handleHDBan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.hdUserDTO(u))
 }
 
+// handleHDCloseTickets closes all open tickets of a helpdesk user (the "close ticket" button of the dialog).
+func (s *Server) handleHDCloseTickets(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	hd, botID, ok := s.helpdeskFor(r)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "бот сейчас не запущен")
+		return
+	}
+	if _, err := hd.User(r.Context(), id); err != nil {
+		handleErr(w, err)
+		return
+	}
+	n, err := s.tasks.CloseHelpdeskTickets(r.Context(), botID, id)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"closed": n})
+}
+
 // handleHDApprove lets a held (captcha / quarantine) user through and relays their messages.
 func (s *Server) handleHDApprove(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r)

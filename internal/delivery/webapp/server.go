@@ -123,6 +123,7 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /api/helpdesk/users/{id}/reply", s.handleHDReply)
 	api.HandleFunc("POST /api/helpdesk/users/{id}/topic", s.handleHDTopic)
 	api.HandleFunc("POST /api/helpdesk/users/{id}/ticket", s.handleHDTicket)
+	api.HandleFunc("POST /api/helpdesk/users/{id}/close-tickets", s.handleHDCloseTickets)
 	api.HandleFunc("POST /api/helpdesk/users/{id}/ban", s.handleHDBan)
 	api.HandleFunc("POST /api/helpdesk/users/{id}/approve", s.handleHDApprove)
 

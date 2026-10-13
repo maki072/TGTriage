@@ -203,7 +203,7 @@ func spamKeyboard(userID int64, banned bool) *telegram.InlineKeyboardMarkup {
 	if banned {
 		return kb(row(cb("✅ Разбанить", spamCallback(userID, false))))
 	}
-	return kb(row(cb("🚫 Спам — забанить", spamCallback(userID, true))))
+	return kb(row(cb("✅ Закрыть тикет", fmt.Sprintf("hb:close:%d", userID))), row(cb("🚫 Спам — забанить", spamCallback(userID, true))))
 }
 
 func (g *Gateway) SendReminder(ctx context.Context, groupID int64, topicID int, text string, userID int64) (int, error) {

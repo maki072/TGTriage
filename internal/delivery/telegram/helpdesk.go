@@ -711,7 +711,8 @@ func (b *Bot) groupCallback(ctx context.Context, ref *msgRef, p []string, answer
 }
 
 // banCallback handles the spam buttons on a user's topic header and quarantine card:
-// hb:ban:<user id>, hb:unban:<user id>, hb:ok:<user id> (approve a held user) and hb:noop:0.
+// hb:close:<user id> (close the user's open tickets), hb:ban:<user id>, hb:unban:<user id>,
+// hb:ok:<user id> (approve a held user) and hb:noop:0.
 func (b *Bot) banCallback(ctx context.Context, ref *msgRef, p []string, answer func(string, bool)) error {
 	if p[1] == "noop" {
 		return nil
@@ -725,6 +726,17 @@ func (b *Bot) banCallback(ctx context.Context, ref *msgRef, p []string, answer f
 		markup *telegram.InlineKeyboardMarkup
 	)
 	switch p[1] {
+	case "close":
+		n, err := b.tasks.CloseHelpdeskTickets(ctx, b.cfg.BotDBID, userID)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			answer("Открытых тикетов нет", false)
+		} else {
+			answer("Тикет закрыт", false)
+		}
+		return nil
 	case "ban", "unban":
 		ban := p[1] == "ban"
 		if _, err := b.helpdesk.SetBanned(ctx, userID, ban); err != nil {
