@@ -1246,3 +1246,20 @@ func truncRunes(s string, n int) string {
 	}
 	return string(r[:n-1]) + "…"
 }
+
+// ClearAwaiting marks the user's messages as handled without a reply (the "close ticket" button):
+// the dialog leaves the "waiting" list and no more reminders come.
+func (s *HelpdeskService) ClearAwaiting(ctx context.Context, userID int64) error {
+	lock := s.userLock(userID)
+	lock.Lock()
+	defer lock.Unlock()
+	u, err := s.repo.GetUser(ctx, s.botDBID, userID)
+	if err != nil {
+		return err
+	}
+	if u.AwaitingSince == nil && u.RemindedAt == nil {
+		return nil
+	}
+	u.AwaitingSince, u.RemindedAt = nil, nil
+	return s.repo.SaveUser(ctx, u)
+}

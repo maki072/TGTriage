@@ -731,8 +731,11 @@ func (b *Bot) banCallback(ctx context.Context, ref *msgRef, p []string, answer f
 		if err != nil {
 			return err
 		}
+		if err := b.helpdesk.ClearAwaiting(ctx, userID); err != nil {
+			return err
+		}
 		if n == 0 {
-			answer("Открытых тикетов нет", false)
+			answer("Открытых тикетов нет, ожидание снято", false)
 		} else {
 			answer("Тикет закрыт", false)
 		}

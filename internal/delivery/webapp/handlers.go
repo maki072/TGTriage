@@ -936,6 +936,9 @@ func (s *Server) handleHDCloseTickets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := s.tasks.CloseHelpdeskTickets(r.Context(), botID, id)
+	if err == nil {
+		err = hd.ClearAwaiting(r.Context(), id)
+	}
 	if err != nil {
 		handleErr(w, err)
 		return

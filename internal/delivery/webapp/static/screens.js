@@ -719,7 +719,7 @@ async function renderDialog(userID, botID, tok) {
     (u.hold ? banner(u.hold === 'captcha' ? 'Пользователь ещё не прошёл капчу — его сообщения ждут' : 'Сообщения новичка на проверке: похоже на спам. Пропустите или забаньте.', 'warning') : '') +
     `<div class="tr-card"><div class="tr-profile">${avatar(u.name, 'lg')}<div class="tr-profile__text"><b>${esc(u.name)}</b><span class="tr-cap">${u.username ? `<a class="tr-link" href="#" data-act="link" data-link="${esc(u.profile_url)}">@${esc(u.username)}</a>` : 'без username'}${u.language_code ? ' · ' + esc(u.language_code) : ''}</span></div></div>` +
     (userBadges(u) ? `<div class="tr-row" style="margin-top:12px">${userBadges(u)}</div>` : '') + `</div>` +
-    (d.tickets.length ? `<section><h3 class="tr-overline">Тикеты · ${open.length} открыто</h3><div class="tr-list">${d.tickets.map(t => taskCard(t)).join('')}</div>${open.length && !u.banned ? btn(open.length > 1 ? 'Закрыть тикеты' : 'Закрыть тикет', { block: true, icon: 'check', act: 'hd-close-tickets' }) : ''}</section>` : '') +
+    (d.tickets.length ? `<section><h3 class="tr-overline">Тикеты · ${open.length} открыто</h3><div class="tr-list">${d.tickets.map(t => taskCard(t)).join('')}</div>${(open.length || u.awaiting_since) && !u.banned ? btn(open.length > 1 ? 'Закрыть тикеты' : open.length ? 'Закрыть тикет' : 'Ответ не нужен', { block: true, icon: 'check', act: 'hd-close-tickets' }) : ''}</section>` : '') +
     (d.held && d.held.length ? `<section><h3 class="tr-overline">Ждут решения · ${d.held.length}</h3><div class="tr-chat">${d.held.map(bubble).join('')}</div></section>` : '') +
     `<section><h3 class="tr-overline">Переписка</h3><div class="tr-chat" id="chat">${d.messages.length ? d.messages.map(bubble).join('') : emptyState('message', 'Сообщений нет', '')}</div></section>`;
   setBottom(u.banned ? `<div class="tr-composer">${btn('Разбанить', { v: 'primary', block: true, icon: 'unlock', act: 'hd-unban' })}</div>`
@@ -745,7 +745,7 @@ async function closeUserTickets() {
   try {
     const r = await api('POST', `/api/helpdesk/users/${userID}/close-tickets?bot=${botID}`);
     haptic('success');
-    toast(r.closed ? 'Тикет закрыт' : 'Открытых тикетов нет');
+    toast(r.closed ? 'Тикет закрыт' : 'Ожидание снято');
     render();
   } catch (e) { toast(e.message, { error: true }); }
 }
@@ -754,7 +754,7 @@ ACT['dialog-menu'] = () => {
   const { d, userID, botID } = state.dialog, u = d.user;
   const items = [];
   if (u.topic_url) items.push({ label: 'Тема в группе', icon: 'external', onSelect: () => openLink(u.topic_url) });
-  if (!u.banned && d.tickets.some(t => isOpen(t.status))) items.push({ label: 'Закрыть тикет', icon: 'check', onSelect: closeUserTickets });
+  if (!u.banned && (u.awaiting_since || d.tickets.some(t => isOpen(t.status)))) items.push({ label: d.tickets.some(t => isOpen(t.status)) ? 'Закрыть тикет' : 'Ответ не нужен', icon: 'check', onSelect: closeUserTickets });
   if (u.banned) {
     items.push({ label: 'Разбанить', icon: 'unlock', onSelect: () => setBanned(userID, botID, false).catch(e => toast(e.message, { error: true })) });
     return openMenu(u.name || 'Диалог', items);
