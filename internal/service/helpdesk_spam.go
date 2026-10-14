@@ -7,6 +7,7 @@ import (
 	"html"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	"tgtriage/internal/domain"
@@ -95,6 +96,9 @@ func spamReasons(in UserMessage) []string {
 // screen decides what happens to a message of an unverified user. It returns true when the
 // message was held (the caller must not relay it). The caller holds the user's lock.
 func (s *HelpdeskService) screen(ctx context.Context, u *domain.HelpdeskUser, in UserMessage, st domain.HelpdeskSettings) (bool, error) {
+	if st.SpamScreen && obviousSpam(in) {
+		return true, s.silentBan(ctx, u, in)
+	}
 	switch {
 	case u.Hold != "":
 		held, err := s.hold(ctx, u, in)
@@ -258,4 +262,58 @@ func (s *HelpdeskService) SuspectSpam(ctx context.Context, userID int64, conf fl
 		return nil, false
 	}
 	return u, true
+}
+
+// reURLToken is a whole word that carries a link, so that its letters do not count as the message's language.
+var reURLToken = regexp.MustCompile(`(?i)\S*(https?://|www\.|\bt\.me/|\btelegram\.(me|dog)/|\btg://)\S*`)
+
+// notRussian reports whether the text is clearly not in Russian (or Ukrainian): written in a foreign
+// script, or in Latin letters without any Cyrillic. Links and @mentions are left out of the count, and
+// a text with next to no words is not judged.
+func notRussian(text string) bool {
+	text = reMention.ReplaceAllString(reURLToken.ReplaceAllString(text, " "), " ")
+	if foreignScript(text) != "" {
+		return true
+	}
+	letters, cyrillic := 0, 0
+	for _, r := range text {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+		letters++
+		if unicode.Is(unicode.Cyrillic, r) {
+			cyrillic++
+		}
+	}
+	return letters >= 6 && cyrillic*100/letters < 10
+}
+
+// obviousSpam is a message with a link that is clearly not in Russian: such messages of a new user are
+// banned at once instead of waiting in quarantine.
+func obviousSpam(in UserMessage) bool {
+	return reLink.MatchString(in.Text) && notRussian(in.Text)
+}
+
+// silentBan bans an unverified user for an obvious spam message without telling anyone: no quarantine
+// card, no topic, nothing is relayed or stored. The ban can be lifted in the panel (Диалоги → Спам).
+// The caller holds the user's lock.
+func (s *HelpdeskService) silentBan(ctx context.Context, u *domain.HelpdeskUser, in UserMessage) error {
+	now := time.Now()
+	u.Banned, u.BannedAt = true, &now
+	u.AwaitingSince, u.RemindedAt, u.Hold = nil, nil, ""
+	if group := s.GroupID(); group != 0 && u.HasTopic(group) && !u.TopicClosed {
+		if err := s.transport.CloseTopic(ctx, group, u.TopicID); err != nil && !errors.Is(err, domain.ErrTopicGone) {
+			s.log.Warn("close banned user's topic", "user_id", u.UserID, "err", err)
+		} else {
+			u.TopicClosed = true
+		}
+	}
+	if err := s.repo.SaveUser(ctx, u); err != nil {
+		return err
+	}
+	if err := s.repo.DeleteHeld(ctx, s.botDBID, u.UserID); err != nil {
+		s.log.Warn("drop banned user's held messages", "user_id", u.UserID, "err", err)
+	}
+	s.log.Info("new user banned silently for an obvious spam message", "user_id", u.UserID, "message_id", in.MessageID)
+	return nil
 }

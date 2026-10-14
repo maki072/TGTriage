@@ -628,3 +628,36 @@ func TestSnoozedReminderComesDueAtTheSnoozeEnd(t *testing.T) {
 		t.Error("snoozing an answered user must fail")
 	}
 }
+
+func TestObviousSpamIsBannedSilently(t *testing.T) {
+	cases := map[string]bool{
+		"Check this out https://scam.example now":             true,
+		"Earn money fast, write to t.me/scam_manager":         true,
+		"点击链接 https://scam.example":                           true,
+		"Заработок без вложений https://scam.example":         false, // Russian: goes to quarantine
+		"Не работает вход, вот скрин https://i.example/1.png": false,
+		"https://scam.example":                                false, // no words to judge
+		"Hello, I need help with my order":                    false, // no link
+		"你好，我们提供最好的服务，欢迎联系我们":                                 false, // no link: quarantine
+	}
+	for text, want := range cases {
+		if got := obviousSpam(UserMessage{Text: text}); got != want {
+			t.Errorf("obviousSpam(%q) = %v, want %v", text, got, want)
+		}
+	}
+
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, nil)
+	fx.newUserSays(t, 79, 1, "Earn money fast https://scam.example")
+	u, err := fx.svc.User(ctx, 79)
+	if err != nil || !u.Banned || u.Hold != "" || u.TopicID != 0 {
+		t.Fatalf("user must be banned without a topic: %+v, %v", u, err)
+	}
+	if len(fx.tr.copies) != 0 || len(fx.tr.topics) != 0 || len(fx.tr.sentTo(testGroup)) != 0 {
+		t.Fatalf("nothing may be relayed or announced: copies=%v topics=%v cards=%v", fx.tr.copies, fx.tr.topics, fx.tr.sentTo(testGroup))
+	}
+	fx.newUserSays(t, 79, 2, "Помогите, не работает")
+	if len(fx.tr.copies) != 0 {
+		t.Error("a banned user's later messages are dropped")
+	}
+}
