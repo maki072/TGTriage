@@ -398,6 +398,13 @@ func (s *Server) handleTaskReply(w http.ResponseWriter, r *http.Request) {
 		handleErr(w, err)
 		return
 	}
+	if t.IsHelpdesk() && t.HasChat() {
+		if closed, _, err := s.tasks.CloseHelpdeskOnDone(r.Context(), domain.ParseHelpdeskBotID(t.ConnectionID), t.ChatID, body.Text, time.Now()); err != nil {
+			s.log.Warn("auto-close ticket", "task_id", t.ID, "err", err)
+		} else if closed != nil {
+			t = closed
+		}
+	}
 	writeJSON(w, http.StatusOK, s.taskResponse(r.Context(), t))
 }
 
@@ -515,7 +522,7 @@ func (s *Server) handleHDReply(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	hd, _, ok := s.helpdeskFor(r)
+	hd, botID, ok := s.helpdeskFor(r)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "бот сейчас не запущен")
 		return
@@ -524,7 +531,13 @@ func (s *Server) handleHDReply(w http.ResponseWriter, r *http.Request) {
 		handleErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	resp := map[string]any{"ok": true}
+	if t, _, err := s.tasks.CloseHelpdeskOnDone(r.Context(), botID, id, body.Text, time.Now()); err != nil {
+		s.log.Warn("auto-close ticket", "user_id", id, "err", err)
+	} else if t != nil {
+		resp["closed"] = t.ID
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleHDTopic(w http.ResponseWriter, r *http.Request) {

@@ -448,8 +448,8 @@ ACT['reply-open'] = () => {
       const sync = () => { b.disabled = !ta.value.trim(); }; sync();
       ta.addEventListener('input', sync);
       b.addEventListener('click', () => withBusy(b, async () => {
-        await api('POST', `/api/tasks/${t.id}/reply`, { text: ta.value.trim() });
-        closeSheet(); toast('Ответ отправлен'); reloadTask(t.id);
+        const r = await api('POST', `/api/tasks/${t.id}/reply`, { text: ta.value.trim() });
+        closeSheet(); toast(r.status === 'done' && t.status !== 'done' ? 'Ответ отправлен, тикет закрыт' : 'Ответ отправлен'); reloadTask(t.id);
       }));
     });
 };
@@ -735,8 +735,8 @@ ACT['hd-send'] = el => {
   const text = ta.value.trim();
   if (!text) return;
   withBusy(el, async () => {
-    await api('POST', `/api/helpdesk/users/${userID}/reply?bot=${botID}`, { text });
-    toast('Отправлено');
+    const r = await api('POST', `/api/helpdesk/users/${userID}/reply?bot=${botID}`, { text });
+    toast(r.closed ? 'Отправлено, тикет #' + r.closed + ' закрыт' : 'Отправлено');
     render();
   });
 };

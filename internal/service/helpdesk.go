@@ -1280,3 +1280,8 @@ func (s *HelpdeskService) OnOperatorReaction(ctx context.Context, groupID int64,
 	}
 	return s.ClearAwaiting(ctx, m.UserID)
 }
+
+// TopicUser returns the user whose topic of the helpdesk group it is (domain.ErrNotFound for any other topic).
+func (s *HelpdeskService) TopicUser(ctx context.Context, groupID int64, topicID int) (*domain.HelpdeskUser, error) {
+	return s.repo.UserByTopic(ctx, s.botDBID, groupID, topicID)
+}

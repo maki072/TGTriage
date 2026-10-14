@@ -209,7 +209,9 @@ func (b *Bot) onGroupMessage(ctx context.Context, m *telegram.Message) {
 	}
 	if err := b.helpdesk.OnOperatorMessage(ctx, in); err != nil {
 		b.log.Error("helpdesk operator message", "topic_id", in.TopicID, "err", err)
+		return
 	}
+	b.autoCloseTicketOnDone(ctx, in)
 }
 
 func editedText(m *telegram.Message) (string, json.RawMessage, bool) {

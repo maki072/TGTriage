@@ -463,7 +463,7 @@ func buildFields() []SettingField {
 		boolField("triage.mark_read_on_work", "MARK_READ_ON_WORK", "triage", "👁 Отмечать прочитанным",
 			"При переводе личной задачи «В работу»", "true", func(s *domain.Settings) *bool { return &s.MarkReadOnWork }),
 		boolField("task.auto_close_on_done", "AUTO_CLOSE_ON_DONE", "triage", "Закрывать задачу по моему «готово»",
-			"Если вы сами пишете собеседнику «готово», «сделал», «готово, отключился» и т.п., открытая личная задача из этого чата закрывается; если их несколько — бот спросит, какую", "true",
+			"Если вы сами пишете собеседнику «готово», «сделал», «готово, отключился» и т.п., открытая личная задача из этого чата закрывается; если их несколько — бот спросит, какую. То же в темах хелпдеска: «готово» оператора закрывает единственный открытый тикет пользователя", "true",
 			func(s *domain.Settings) *bool { return &s.AutoCloseOnDone }),
 		boolField("task.notify_done_on_close", "NOTIFY_DONE_ON_CLOSE", "triage", "Спрашивать про «Готово»",
 			"При закрытии задачи предлагать отправить сообщение", "false",

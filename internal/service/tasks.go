@@ -570,3 +570,34 @@ func (s *TaskService) setHelpdeskTickets(ctx context.Context, botID, userID int6
 	}
 	return len(open), nil
 }
+
+// CloseHelpdeskOnDone closes the open ticket of a helpdesk user when an operator's message declares the
+// work finished ("готово", "готово, отключился", see IsDoneMessage). at is when the message was written:
+// a ticket created after it cannot be the one it answers. Several open tickets are never guessed at: none
+// is closed and ambiguous is true. Returns nil, false when nothing applies (setting off, other text, no ticket).
+func (s *TaskService) CloseHelpdeskOnDone(ctx context.Context, botID, userID int64, text string, at time.Time) (closed *domain.Task, ambiguous bool, err error) {
+	if !s.settings.Get().AutoCloseOnDone || !IsDoneMessage(text) {
+		return nil, false, nil
+	}
+	open, _, err := s.tasks.List(ctx, domain.TaskFilter{
+		ConnectionID: domain.HelpdeskConnectionFor(botID), ChatID: userID,
+		Statuses: []domain.TaskStatus{domain.StatusNew, domain.StatusInProgress, domain.StatusSnoozed}, Limit: 10,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	var cands []domain.Task
+	for _, t := range open {
+		if !t.CreatedAt.After(at.Add(time.Minute)) {
+			cands = append(cands, t)
+		}
+	}
+	switch len(cands) {
+	case 0:
+		return nil, false, nil
+	case 1:
+		t, err := s.SetStatus(ctx, cands[0].ID, domain.StatusDone)
+		return t, false, err
+	}
+	return nil, true, nil
+}
