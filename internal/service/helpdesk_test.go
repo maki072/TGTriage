@@ -637,8 +637,10 @@ func TestObviousSpamIsBannedSilently(t *testing.T) {
 		"Заработок без вложений https://scam.example":         false, // Russian: goes to quarantine
 		"Не работает вход, вот скрин https://i.example/1.png": false,
 		"https://scam.example":                                false, // no words to judge
-		"Hello, I need help with my order":                    false, // no link
-		"你好，我们提供最好的服务，欢迎联系我们":                                 false, // no link: quarantine
+		"Hello, I need help with my order":                    true,  // no link is needed
+		"你好，我们提供最好的服务，欢迎联系我们":                                 true,
+		"AnyDesk 123 456 789":                                 false, // a product name and an id are not a language
+		"Привет, как дела? Hello":                             false,
 	}
 	for text, want := range cases {
 		if got := obviousSpam(UserMessage{Text: text}); got != want {

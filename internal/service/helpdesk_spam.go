@@ -268,33 +268,43 @@ func (s *HelpdeskService) SuspectSpam(ctx context.Context, userID int64, conf fl
 var reURLToken = regexp.MustCompile(`(?i)\S*(https?://|www\.|\bt\.me/|\btelegram\.(me|dog)/|\btg://)\S*`)
 
 // notRussian reports whether the text is clearly not in Russian (or Ukrainian): written in a foreign
-// script, or in Latin letters without any Cyrillic. Links and @mentions are left out of the count, and
-// a text with next to no words is not judged.
-func notRussian(text string) bool {
+// script, or in Latin letters without any Cyrillic. Links and @mentions are left out of the count. A
+// Latin text is judged only when it has at least minWords words and minLetters letters, so that a
+// brand name, a product or an AnyDesk id is not taken for a foreign language.
+func notRussian(text string, minWords, minLetters int) bool {
 	text = reMention.ReplaceAllString(reURLToken.ReplaceAllString(text, " "), " ")
 	if foreignScript(text) != "" {
 		return true
 	}
-	letters, cyrillic := 0, 0
+	letters, cyrillic, words := 0, 0, 0
+	inWord := false
 	for _, r := range text {
 		if !unicode.IsLetter(r) {
+			inWord = false
 			continue
 		}
 		letters++
 		if unicode.Is(unicode.Cyrillic, r) {
 			cyrillic++
 		}
+		if !inWord {
+			words++
+			inWord = true
+		}
 	}
-	return letters >= 6 && cyrillic*100/letters < 10
+	return words >= minWords && letters >= minLetters && cyrillic*100/letters < 10
 }
 
-// obviousSpam is a message with a link that is clearly not in Russian: such messages of a new user are
-// banned at once instead of waiting in quarantine.
+// obviousSpam is a message of a new user that is clearly not in Russian. With a link a few words are
+// enough; without one the text must be longer. Such users are banned at once instead of waiting in quarantine.
 func obviousSpam(in UserMessage) bool {
-	return reLink.MatchString(in.Text) && notRussian(in.Text)
+	if reLink.MatchString(in.Text) {
+		return notRussian(in.Text, 1, 6)
+	}
+	return notRussian(in.Text, 4, 15)
 }
 
-// silentBan bans an unverified user for an obvious spam message without telling anyone: no quarantine
+// silentBan bans an unverified user for a clearly foreign-language message without telling anyone: no quarantine
 // card, no topic, nothing is relayed or stored. The ban can be lifted in the panel (Диалоги → Спам).
 // The caller holds the user's lock.
 func (s *HelpdeskService) silentBan(ctx context.Context, u *domain.HelpdeskUser, in UserMessage) error {

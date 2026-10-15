@@ -145,8 +145,8 @@ type HelpdeskSettings struct {
 	OffHoursText     string // {hours} is replaced with HoursLabel()
 	ReminderMinutes  int    // 0 = no reminders about unanswered users
 	// SpamScreen holds the messages of new users that look like spam (links, @mentions, forwards,
-	// Chinese/Arabic/... text) in a quarantine topic until an operator approves or bans them; a link in a
-	// text that is clearly not Russian bans the user at once, silently.
+	// Chinese/Arabic/... text) in a quarantine topic until an operator approves or bans them. A message that
+	// is clearly not in Russian (with or without a link) bans the user at once, silently.
 	SpamScreen bool
 	// SpamCaptcha makes every new user press "I am not a bot" before their first message is relayed.
 	SpamCaptcha bool
