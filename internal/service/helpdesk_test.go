@@ -307,6 +307,71 @@ func TestOffHoursAutoReply(t *testing.T) {
 	}
 }
 
+func TestOffHoursNoticeNotRepeatedAfterOperatorReply(t *testing.T) {
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, nil)
+	if _, err := fx.settings.Update(ctx, func(s *domain.Settings) {
+		s.Helpdesk.HoursEnabled, s.Helpdesk.HoursStart, s.Helpdesk.HoursEnd = true, "00:00", "00:00" // never open
+	}); err != nil {
+		t.Fatal(err)
+	}
+	notices := func() int {
+		n := 0
+		for _, m := range fx.tr.sentTo(42) {
+			if strings.Contains(m.text, "нерабочее время") {
+				n++
+			}
+		}
+		return n
+	}
+	fx.userSays(t, 10, "Нужен доступ")
+	u, _ := fx.svc.User(ctx, 42)
+	// the operator answers at night: the waiting cycle ends
+	if err := fx.svc.OnOperatorMessage(ctx, OperatorMessage{GroupID: testGroup, TopicID: u.TopicID, MessageID: 301, OperatorID: 500,
+		RawText: "Пришлите anydesk", Text: "Пришлите anydesk"}); err != nil {
+		t.Fatal(err)
+	}
+	fx.userSays(t, 11, "123456789")
+	if got := notices(); got != 1 {
+		t.Fatalf("a new waiting cycle within the cooldown must not repeat the off-hours notice, got %d", got)
+	}
+
+	// after the cooldown the notice is sent again
+	u, _ = fx.svc.User(ctx, 42)
+	old := time.Now().Add(-offHoursNoticeEvery - time.Minute)
+	u.OffHoursAt, u.AwaitingSince = &old, nil
+	if err := fx.store.Helpdesk.SaveUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	fx.userSays(t, 12, "Ещё вопрос")
+	if got := notices(); got != 2 {
+		t.Fatalf("the notice must come again after the cooldown, got %d", got)
+	}
+}
+
+func TestThanksAfterAnswerStartsNoWaiting(t *testing.T) {
+	ctx := context.Background()
+	fx := newHelpdeskFixture(t, nil)
+	fx.userSays(t, 10, "Не работает вход")
+	u, _ := fx.svc.User(ctx, 42)
+	if err := fx.svc.OnOperatorMessage(ctx, OperatorMessage{GroupID: testGroup, TopicID: u.TopicID, MessageID: 301, OperatorID: 500,
+		RawText: "Готово", Text: "Готово"}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(fx.tr.copies)
+	fx.userSays(t, 11, "Спасибо большое!")
+	if u, _ = fx.svc.User(ctx, 42); u.AwaitingSince != nil {
+		t.Error("a bare thank-you after an answer must not start a new waiting cycle")
+	}
+	if len(fx.tr.copies) != before+1 {
+		t.Error("the thank-you must still be relayed to the topic")
+	}
+	fx.userSays(t, 12, "А ещё вопрос")
+	if u, _ = fx.svc.User(ctx, 42); u.AwaitingSince == nil {
+		t.Error("a real message must start waiting")
+	}
+}
+
 func TestRemindersRepeatAfterInterval(t *testing.T) {
 	ctx := context.Background()
 	fx := newHelpdeskFixture(t, nil)

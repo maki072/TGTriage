@@ -314,6 +314,9 @@ var migrations = [][]string{
 	{
 		`ALTER TABLE bots ADD COLUMN hd_delete_service INTEGER NOT NULL DEFAULT 1`,
 	},
+	{
+		`ALTER TABLE hd_users ADD COLUMN off_hours_at INTEGER NOT NULL DEFAULT 0`,
+	},
 }
 
 // Backup writes a consistent, compacted copy of the database to path (which must not exist).

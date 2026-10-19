@@ -29,6 +29,7 @@ type HelpdeskUser struct {
 	SpamFlagged   bool       // the LLM already warned the operators about this user
 	AwaitingSince *time.Time // first user message not answered by an operator yet
 	RemindedAt    *time.Time // last reminder about AwaitingSince
+	OffHoursAt    *time.Time // when the user was last sent the off-hours notice (not repeated for a few hours)
 	LastMessageAt *time.Time
 	CreatedAt     time.Time
 	UpdatedAt     time.Time

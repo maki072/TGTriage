@@ -17,16 +17,16 @@ type HelpdeskRepo struct{ db *sql.DB }
 var _ domain.HelpdeskRepository = (*HelpdeskRepo)(nil)
 
 const hdUserColumns = `bot_id, user_id, name, username, language_code, source, group_id, topic_id, topic_closed, blocked, banned, banned_at, verified, hold, spam_flagged,
-	awaiting_since, reminded_at, last_message_at, created_at, updated_at`
+	awaiting_since, reminded_at, last_message_at, created_at, updated_at, off_hours_at`
 
 func scanHDUser(sc interface{ Scan(...any) error }) (domain.HelpdeskUser, error) {
 	var (
-		u                                           domain.HelpdeskUser
-		closed, blocked, banned, verified, flagged  int
-		bannedAt, awaiting, reminded, last, cr, upd int64
+		u                                                     domain.HelpdeskUser
+		closed, blocked, banned, verified, flagged            int
+		bannedAt, awaiting, reminded, last, cr, upd, offHours int64
 	)
 	err := sc.Scan(&u.BotID, &u.UserID, &u.Name, &u.Username, &u.LanguageCode, &u.Source, &u.GroupID, &u.TopicID, &closed, &blocked, &banned, &bannedAt, &verified, &u.Hold, &flagged,
-		&awaiting, &reminded, &last, &cr, &upd)
+		&awaiting, &reminded, &last, &cr, &upd, &offHours)
 	if err != nil {
 		return u, err
 	}
@@ -39,6 +39,7 @@ func scanHDUser(sc interface{ Scan(...any) error }) (domain.HelpdeskUser, error)
 	u.AwaitingSince = ptrFromUnix(awaiting)
 	u.RemindedAt = ptrFromUnix(reminded)
 	u.LastMessageAt = ptrFromUnix(last)
+	u.OffHoursAt = ptrFromUnix(offHours)
 	u.CreatedAt = fromUnix(cr)
 	u.UpdatedAt = fromUnix(upd)
 	return u, nil
@@ -70,16 +71,17 @@ func (r *HelpdeskRepo) SaveUser(ctx context.Context, u *domain.HelpdeskUser) err
 		u.CreatedAt = now
 	}
 	u.UpdatedAt = now
-	_, err := r.db.ExecContext(ctx, `INSERT INTO hd_users (`+hdUserColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO hd_users (`+hdUserColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (bot_id, user_id) DO UPDATE SET
 			name = excluded.name, username = excluded.username, language_code = excluded.language_code,
 			source = excluded.source, group_id = excluded.group_id, topic_id = excluded.topic_id,
 			topic_closed = excluded.topic_closed, blocked = excluded.blocked, banned = excluded.banned,
 			banned_at = excluded.banned_at, verified = excluded.verified, hold = excluded.hold, spam_flagged = excluded.spam_flagged,
 			awaiting_since = excluded.awaiting_since,
-			reminded_at = excluded.reminded_at, last_message_at = excluded.last_message_at, updated_at = excluded.updated_at`,
+			reminded_at = excluded.reminded_at, last_message_at = excluded.last_message_at, updated_at = excluded.updated_at,
+			off_hours_at = excluded.off_hours_at`,
 		u.BotID, u.UserID, u.Name, u.Username, u.LanguageCode, u.Source, u.GroupID, u.TopicID, boolInt(u.TopicClosed), boolInt(u.Blocked), boolInt(u.Banned), ptrToUnix(u.BannedAt), boolInt(u.Verified), u.Hold, boolInt(u.SpamFlagged),
-		ptrToUnix(u.AwaitingSince), ptrToUnix(u.RemindedAt), ptrToUnix(u.LastMessageAt), toUnix(u.CreatedAt), toUnix(u.UpdatedAt))
+		ptrToUnix(u.AwaitingSince), ptrToUnix(u.RemindedAt), ptrToUnix(u.LastMessageAt), toUnix(u.CreatedAt), toUnix(u.UpdatedAt), ptrToUnix(u.OffHoursAt))
 	if err != nil {
 		return fmt.Errorf("save helpdesk user: %w", err)
 	}

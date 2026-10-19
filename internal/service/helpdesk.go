@@ -286,8 +286,11 @@ func (s *HelpdeskService) OnUserMessage(ctx context.Context, in UserMessage) err
 // and triage and sends the auto-reply. The caller holds the user's lock.
 func (s *HelpdeskService) deliver(ctx context.Context, u *domain.HelpdeskUser, st domain.HelpdeskSettings, in UserMessage, renamed bool) error {
 	now := time.Now()
+	// A bare "thanks"/emoji after an answered dialog is only a closer: it is relayed to the topic but
+	// starts no waiting cycle (no reminders, no auto-reply).
+	closer := u.AwaitingSince == nil && u.LastMessageAt != nil && isNoiseText(in.Text)
 	u.LastMessageAt = &now
-	firstInCycle := u.AwaitingSince == nil
+	firstInCycle := u.AwaitingSince == nil && !closer
 	if firstInCycle {
 		u.AwaitingSince = &now
 		u.RemindedAt = nil
@@ -431,10 +434,18 @@ func (s *HelpdeskService) storeIncoming(ctx context.Context, u *domain.HelpdeskU
 	}
 }
 
+// offHoursNoticeEvery is how rarely one user gets the off-hours notice: an operator who answers at night
+// and a user who replies "thanks" must not trigger it again.
+const offHoursNoticeEvery = 6 * time.Hour
+
 func (s *HelpdeskService) autoReply(ctx context.Context, u *domain.HelpdeskUser, st domain.HelpdeskSettings, now time.Time) {
 	var text string
 	switch {
 	case st.HoursEnabled && !st.InWorkingHours(now.In(s.settings.Location())) && strings.TrimSpace(st.OffHoursText) != "":
+		if u.OffHoursAt != nil && now.Sub(*u.OffHoursAt) < offHoursNoticeEvery {
+			return
+		}
+		u.OffHoursAt = &now
 		text = strings.ReplaceAll(st.OffHoursText, "{hours}", st.HoursLabel())
 	case st.AutoReplyEnabled:
 		text = st.AutoReplyText
