@@ -1,7 +1,7 @@
 # TG Triage
 
 [![CI](https://github.com/maki072/TGTriage/actions/workflows/ci.yml/badge.svg)](https://github.com/maki072/TGTriage/actions/workflows/ci.yml)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![License: EULA](https://img.shields.io/badge/License-EULA-lightgrey.svg)](LICENSE)
 
 Telegram-бот, веб-панель и два режима работы, которые включаются одновременно:
 
@@ -190,4 +190,6 @@ sudo systemctl restart tg-triage
 
 ## Лицензия
 
-[GNU AGPLv3](LICENSE) © maki072. Проект не аффилирован с Telegram.
+Проприетарное ПО, исходный код доступен для ознакомления: [лицензионное соглашение (EULA)](LICENSE)
+© 2026 maki072. Версии, опубликованные ранее под MIT и AGPLv3, остаются на условиях тех лицензий.
+Проект не аффилирован с Telegram.
