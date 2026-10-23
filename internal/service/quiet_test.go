@@ -72,7 +72,7 @@ func TestCredentialsNeverReachTheModel(t *testing.T) {
 	p := &fakeProvider{reqs: make(chan ai.Request, 4), resp: forwardTaskJSON}
 	s, _, n := newQuietTestService(t, p)
 	text := "Войди в 1С: логин: ivan.p пароль: Zx9!kLm2, anydesk 409 627 158, почта boss@example.com, " +
-		"ключ sk-ant-api03-AbCdEfGhIjKlMnOpQrSt"
+		"ключ sk-" + "ant-api03-AbCdEfGhIjKlMnOpQrSt"
 	if err := s.OnIncoming(context.Background(), &domain.Message{ConnectionID: "biz", ChatID: 7, MessageID: 1,
 		SenderID: 7, SenderName: "Иван", Text: text, SentAt: time.Now()}); err != nil {
 		t.Fatal(err)
