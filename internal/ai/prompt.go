@@ -125,7 +125,7 @@ func UserPrompt(in TriageInput) string {
 		b.WriteString("нет\n")
 	}
 	for _, t := range in.OpenTasks {
-		fmt.Fprintf(&b, "- id=%d [%s/%s] %s — %s\n", t.ID, t.Priority, t.Status, t.Title, truncateRunes(t.Description, 300))
+		fmt.Fprintf(&b, "- id=%d [%s/%s] %s — %s\n", t.ID, t.Priority, t.Status, Redact(t.Title), truncateRunes(Redact(t.Description), 300))
 	}
 	b.WriteString("</open_tasks>\n\n<context>\n")
 	if len(in.Context) == 0 {
@@ -147,7 +147,7 @@ func writeLine(b *strings.Builder, m domain.Message, loc *time.Location, them, u
 	if m.Outgoing {
 		who = us
 	}
-	fmt.Fprintf(b, "[%s] %s: %s\n", m.SentAt.In(loc).Format("02.01 15:04"), who, truncateRunes(m.Text, 4000))
+	fmt.Fprintf(b, "[%s] %s: %s\n", m.SentAt.In(loc).Format("02.01 15:04"), who, truncateRunes(RedactMessage(m.Text), 4000))
 }
 
 func writeCurrentTime(b *strings.Builder, now time.Time, loc *time.Location) {

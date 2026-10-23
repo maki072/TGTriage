@@ -26,7 +26,7 @@ func writeExamples(b *strings.Builder, title string, examples []string) {
 	}
 	b.WriteString(title + "\n")
 	for _, e := range examples {
-		fmt.Fprintf(b, "- %s\n", strings.ReplaceAll(truncateRunes(e, 240), "\n", " "))
+		fmt.Fprintf(b, "- %s\n", strings.ReplaceAll(truncateRunes(RedactMessage(e), 240), "\n", " "))
 	}
 }
 
@@ -66,7 +66,7 @@ func StyleProfileUser(samples []string) string {
 	var b strings.Builder
 	b.WriteString("Сообщения владельца:\n")
 	for _, s := range samples {
-		fmt.Fprintf(&b, "- %s\n", strings.ReplaceAll(truncateRunes(s, 300), "\n", " "))
+		fmt.Fprintf(&b, "- %s\n", strings.ReplaceAll(truncateRunes(RedactMessage(s), 300), "\n", " "))
 	}
 	return b.String()
 }

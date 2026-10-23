@@ -66,7 +66,7 @@ func ForwardUserPrompt(in ForwardInput) string {
 				who += " (@" + m.SenderUsername + ")"
 			}
 		}
-		fmt.Fprintf(&b, "[%s] %s: %s\n", m.SentAt.In(loc).Format("02.01.2006 15:04"), who, truncateRunes(m.Text, 4000))
+		fmt.Fprintf(&b, "[%s] %s: %s\n", m.SentAt.In(loc).Format("02.01.2006 15:04"), who, truncateRunes(RedactMessage(m.Text), 4000))
 	}
 	b.WriteString("</forwarded_messages>")
 	return b.String()

@@ -116,6 +116,12 @@ type Settings struct {
 	// PersonalReminderMinutes: how often to re-notify the owner about an open task that came from a
 	// personal (Telegram Business) chat, until it's closed. 0 — no repeated reminders.
 	PersonalReminderMinutes int
+	// ThreadMinutes: a follow-up in a personal chat joins the chat's open task touched within this many
+	// minutes instead of opening a new one (one conversation, one task). 0 — off.
+	ThreadMinutes int
+	// QuietActiveMinutes: cards and reminders about a chat the owner wrote in within this many minutes
+	// arrive without a sound, and updates of an existing card never ring. 0 — always ring.
+	QuietActiveMinutes int
 
 	DigestEnabled bool
 	DigestTime    string // HH:MM in service timezone

@@ -473,6 +473,12 @@ func buildFields() []SettingField {
 		intField("triage.personal_reminder_minutes", "", "triage", "Повторное напоминание о личных задачах, мин",
 			"Бот повторно напоминает об открытой задаче из личных сообщений, пока её не закроют. 0 — выключено",
 			"0", 0, 10080, func(s *domain.Settings) *int { return &s.PersonalReminderMinutes }),
+		intField("triage.thread_minutes", "", "triage", "Один диалог — одна задача, мин",
+			"Новое сообщение в чате, где уже есть открытая задача (новая или в работе), которой касались не позже чем столько минут назад, дополняет её, а не заводит новую. Отложенные задачи не склеиваются. 0 — выключено",
+			"120", 0, 1440, func(s *domain.Settings) *int { return &s.ThreadMinutes }),
+		intField("triage.quiet_active_minutes", "", "triage", "Без звука, пока я в диалоге, мин",
+			"Если вы сами писали в этом чате не позже чем столько минут назад, карточка новой задачи и повторное напоминание приходят без звука; обновления уже существующей карточки всегда тихие. 0 — всегда со звуком",
+			"15", 0, 240, func(s *domain.Settings) *int { return &s.QuietActiveMinutes }),
 	)
 
 	// general

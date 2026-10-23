@@ -445,13 +445,22 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 			}
 		}
 	}
+	if target == nil && !helpdesk {
+		// One conversation, one task: the model did not link the message, but the chat has a live task.
+		target = threadTask(openTasks, time.Now(), time.Duration(st.ThreadMinutes)*time.Minute)
+	}
 	if target != nil {
+		wasCritical := target.Priority == domain.PriorityCritical
 		s.merge(target, analysis, live)
 		if err := s.tasks.Update(ctx, target); err != nil {
 			return err
 		}
 		if err := s.analyses.SetTaskID(ctx, rec.ID, target.ID); err != nil {
 			log.Warn("link analysis to task", "err", err)
+		}
+		// A follow-up refreshes the card without a sound — unless it just became critical.
+		if !helpdesk && st.QuietActiveMinutes > 0 && (wasCritical || target.Priority != domain.PriorityCritical) {
+			ctx = WithSilent(ctx)
 		}
 		s.notifyTask(ctx, target, false)
 		return nil
@@ -483,6 +492,9 @@ func (s *TriageService) analyze(ctx context.Context, b batch, log *slog.Logger) 
 	}
 	if err := s.analyses.SetTaskID(ctx, rec.ID, t.ID); err != nil {
 		log.Warn("link analysis to task", "err", err)
+	}
+	if !helpdesk && ownerActive(history, time.Now(), st.QuietActiveMinutes) {
+		ctx = WithSilent(ctx) // the owner is in the conversation and sees the message in Telegram
 	}
 	s.notifyTask(ctx, t, true)
 	return nil
@@ -647,6 +659,8 @@ func (s *TriageService) runChain(ctx context.Context, st domain.Settings, req ai
 	if len(st.AIChain) == 0 {
 		return res, domain.ErrProviderUnset
 	}
+	// The last line of defense: whatever a prompt builder put together, no credential leaves the server.
+	req.System, req.User = ai.Redact(req.System), ai.Redact(req.User)
 	for i, entry := range st.AIChain {
 		if i > 0 && ctx.Err() != nil {
 			errs = append(errs, ctx.Err())

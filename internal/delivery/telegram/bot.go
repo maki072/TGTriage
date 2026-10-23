@@ -196,7 +196,8 @@ func (b *Bot) render(ctx context.Context, ref *msgRef, text string, markup *tele
 func (b *Bot) sendTo(ctx context.Context, chatID int64, text string, markup *telegram.InlineKeyboardMarkup) error {
 	_, err := b.api.SendMessage(ctx, telegram.SendMessageParams{
 		ChatID: chatID, Text: text, ParseMode: "HTML", ReplyMarkup: markup,
-		LinkPreviewOptions: &telegram.LinkPreviewOptions{IsDisabled: true},
+		LinkPreviewOptions:  &telegram.LinkPreviewOptions{IsDisabled: true},
+		DisableNotification: service.IsSilent(ctx),
 	})
 	return err
 }

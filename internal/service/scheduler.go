@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"tgtriage/internal/domain"
@@ -133,9 +134,27 @@ func (s *Scheduler) personalNudges(ctx context.Context) {
 	}
 	if n, ok := s.notifiers.For(0); ok {
 		for i := range nudged {
+			if s.ownerHandling(ctx, &nudged[i], minutes) {
+				continue
+			}
 			n.PersonalNudge(ctx, &nudged[i])
 		}
 	}
+}
+
+// ownerHandling reports whether the owner wrote in the task's chat during the last reminder interval:
+// they are answering already, so nagging them about the task would only add noise. The reminder is not
+// lost — the task was marked as reminded and comes back after the next interval. Off together with
+// the quiet-while-active setting.
+func (s *Scheduler) ownerHandling(ctx context.Context, t *domain.Task, minutes int) bool {
+	if s.settings.Get().QuietActiveMinutes <= 0 {
+		return false
+	}
+	recent, err := s.messages.History(ctx, t.ConnectionID, t.ChatID, math.MaxInt64, 5)
+	if err != nil {
+		return false
+	}
+	return ownerActive(recent, time.Now(), minutes)
 }
 
 // digestDue reports whether the morning digest recorded under metaKey is due: it is sent once a day
